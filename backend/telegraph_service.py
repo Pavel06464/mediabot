@@ -43,7 +43,7 @@ def build_html(blocks, base_url: str) -> str:
             if text.strip():
                 parts.append(f"<p>{text}</p>")
         elif t == "photo":
-            url = _media_url(base_url, b["media_id"])
+            url = b.get("url") or _media_url(base_url, b["media_id"])
             fig = f'<figure><img src="{url}"/>'
             cap = html.escape(b.get("caption") or "")
             if cap:
@@ -51,7 +51,7 @@ def build_html(blocks, base_url: str) -> str:
             fig += "</figure>"
             parts.append(fig)
         elif t == "video":
-            url = _media_url(base_url, b["media_id"])
+            url = b.get("url") or _media_url(base_url, b["media_id"])
             fig = f'<figure><video src="{url}" controls></video>'
             cap = html.escape(b.get("caption") or "")
             if cap:

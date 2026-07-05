@@ -112,90 +112,23 @@ curl http://localhost:8081   # должен отвечать
 
 ---
 
-## 4. Код бота: изменения для Local API Server + R2
+## 4. Код бота: поддержка Local API + R2 уже встроена ✅
 
-### 4.1. Получаем код
+> Ничего вручную редактировать в `.py` НЕ нужно — поддержка Local Bot API Server и Cloudflare R2 уже реализована в коде (`storage.py`, `telegram_bot.py`, `telegraph_service.py`). Всё включается через переменные окружения в `backend/.env` (шаг 6):
+> - если заданы `R2_*` — медиа грузится в R2;
+> - если заданы `R2_*` не полностью — медиа хранится в MongoDB GridFS (fallback);
+> - если задан `TELEGRAM_LOCAL_API_URL` — бот работает через Local Bot API Server (файлы до 2 ГБ).
 
-Скачайте код из Emergent (кнопка «Download code» / push в GitHub) и залейте на сервер:
+### Установка окружения бота
 
 ```bash
-cd ~
-git clone ВАШ_РЕПОЗИТОРИЙ app   # или scp -r локально
 cd ~/app/backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-pip install boto3   # для R2, если ещё не добавлен
 ```
 
-### 4.2. Указать боту Local API Server (`telegram_bot.py`)
-
-В функции `start_bot()` создание `Bot` заменить на использование локального сервера:
-
-```python
-from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.client.telegram import TelegramAPIServer
-
-LOCAL_API = os.environ.get("TELEGRAM_LOCAL_API_URL")  # напр. http://localhost:8081
-
-def _build_bot():
-    kwargs = {"default": DefaultBotProperties(parse_mode=ParseMode.HTML)}
-    if LOCAL_API:
-        session = AiohttpSession(api=TelegramAPIServer.from_base(LOCAL_API, is_local=True))
-        kwargs["session"] = session
-    return Bot(token=TOKEN, **kwargs)
-```
-
-> `is_local=True` говорит aiogram, что `getFile` вернёт локальный путь к файлу (его читаем напрямую с диска, а не качаем по URL).
-
-### 4.3. Загрузка медиа в Cloudflare R2 вместо GridFS
-
-Создайте `backend/storage.py`:
-
-```python
-import os, boto3
-from botocore.config import Config
-
-_s3 = None
-
-def _client():
-    global _s3
-    if _s3 is None:
-        _s3 = boto3.client(
-            "s3",
-            endpoint_url=os.environ["R2_ENDPOINT"],          # https://<accountid>.r2.cloudflarestorage.com
-            aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
-            aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
-            config=Config(signature_version="s3v4"),
-            region_name="auto",
-        )
-    return _s3
-
-def upload_file(local_path: str, key: str, content_type: str) -> str:
-    # multipart автоматически включается boto3 для больших файлов
-    _client().upload_file(
-        local_path, os.environ["R2_BUCKET"], key,
-        ExtraArgs={"ContentType": content_type},
-    )
-    # публичный URL через ваш public-домен R2 или R2.dev
-    return f"{os.environ['R2_PUBLIC_BASE'].rstrip('/')}/{key}"
-```
-
-И в `_store_media` (`telegram_bot.py`) вместо GridFS:
-
-```python
-async def _store_media(file_id, content_type, kind):
-    file = await bot.get_file(file_id)
-    # при is_local=True file.file_path — это путь на диске Local API Server
-    local_path = file.file_path
-    import uuid
-    ext = "mp4" if kind == "video" else "jpg"
-    key = f"{kind}/{uuid.uuid4()}.{ext}"
-    url = upload_file(local_path, key, content_type)  # вынести в executor при больших файлах
-    return url   # теперь храним прямой URL, а не media_id
-```
-
-> При переходе на прямые URL обновите `telegraph_service.build_html` — используйте `b["url"]` напрямую вместо построения `/api/media/{id}`. GridFS-эндпоинт `/api/media` можно оставить для обратной совместимости или удалить.
+> ⚠️ Блоки Python-кода в этом файле — это описание того, ЧТО уже сделано в репозитории. Их НЕ нужно вставлять в терминал.
 
 ---
 

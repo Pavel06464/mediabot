@@ -1,11 +1,15 @@
 import os
 import uuid
+import asyncio
+import tempfile
 import logging
 from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -20,14 +24,25 @@ from aiogram.types import (
 
 from database import db, get_gridfs
 from telegraph_service import create_post_page
+import storage
 
 logger = logging.getLogger("telegram_bot")
 
 BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+LOCAL_API = os.environ.get("TELEGRAM_LOCAL_API_URL")  # напр. http://localhost:8081
 
 bot: Bot | None = None
 router = Router()
+
+
+def _build_bot() -> Bot:
+    kwargs = {"default": DefaultBotProperties(parse_mode=ParseMode.HTML)}
+    if LOCAL_API:
+        session = AiohttpSession(api=TelegramAPIServer.from_base(LOCAL_API, is_local=True))
+        kwargs["session"] = session
+        logger.info("Using Local Bot API Server at %s", LOCAL_API)
+    return Bot(token=TOKEN, **kwargs)
 
 
 class PostFSM(StatesGroup):
@@ -83,15 +98,35 @@ def back_menu_kb() -> InlineKeyboardMarkup:
 
 
 # ---------- Helpers ----------
-async def _store_media(file_id: str, content_type: str, kind: str) -> str:
+async def _store_media(file_id: str, content_type: str, kind: str) -> dict:
+    """Возвращает dict с 'url' (публичная ссылка на медиа) и опц. 'media_id' (для GridFS)."""
     file = await bot.get_file(file_id)
+
+    if storage.r2_enabled():
+        ext = "mp4" if kind == "video" else "jpg"
+        key = f"{kind}/{uuid.uuid4()}.{ext}"
+        if LOCAL_API:
+            # при is_local=True file.file_path — путь к файлу на диске (общий том с API-сервером)
+            url = await asyncio.to_thread(storage.upload_file, file.file_path, key, content_type)
+        else:
+            buf = await bot.download_file(file.file_path)
+            tmp = tempfile.NamedTemporaryFile(delete=False)
+            tmp.write(buf.read())
+            tmp.close()
+            try:
+                url = await asyncio.to_thread(storage.upload_file, tmp.name, key, content_type)
+            finally:
+                os.unlink(tmp.name)
+        return {"url": url}
+
+    # Fallback: хранение в MongoDB GridFS, отдача через /api/media/{id}
     buf = await bot.download_file(file.file_path)
     data = buf.read()
     bucket = get_gridfs()
     oid = await bucket.upload_from_stream(
         f"{kind}_{file_id}", data, metadata={"content_type": content_type}
     )
-    return str(oid)
+    return {"media_id": str(oid), "url": f"{BASE_URL}/api/media/{oid}"}
 
 
 async def get_user_channel(user_id: int):
@@ -178,7 +213,7 @@ async def fsm_photo(message: Message, state: FSMContext):
     data = await state.get_data()
     blocks = data.get("blocks", [])
     media_id = await _store_media(message.photo[-1].file_id, "image/jpeg", "photo")
-    blocks.append({"type": "photo", "media_id": media_id, "caption": message.caption or ""})
+    blocks.append({"type": "photo", "caption": message.caption or "", **media_id})
     await state.update_data(blocks=blocks)
     await message.answer(f"🖼 Фото добавлено. Элементов: {len(blocks)}", reply_markup=content_kb())
 
@@ -188,7 +223,7 @@ async def fsm_video(message: Message, state: FSMContext):
     data = await state.get_data()
     blocks = data.get("blocks", [])
     media_id = await _store_media(message.video.file_id, message.video.mime_type or "video/mp4", "video")
-    blocks.append({"type": "video", "media_id": media_id, "caption": message.caption or ""})
+    blocks.append({"type": "video", "caption": message.caption or "", **media_id})
     await state.update_data(blocks=blocks)
     await message.answer(f"🎬 Видео добавлено. Элементов: {len(blocks)}", reply_markup=content_kb())
 
@@ -202,7 +237,7 @@ async def fsm_document(message: Message, state: FSMContext):
         blocks = data.get("blocks", [])
         kind = "photo" if mime.startswith("image/") else "video"
         media_id = await _store_media(doc.file_id, mime, kind)
-        blocks.append({"type": kind, "media_id": media_id, "caption": message.caption or ""})
+        blocks.append({"type": kind, "caption": message.caption or "", **media_id})
         await state.update_data(blocks=blocks)
         await message.answer(f"📎 Медиа добавлено. Элементов: {len(blocks)}", reply_markup=content_kb())
     else:
@@ -417,7 +452,7 @@ async def start_bot():
     if not TOKEN:
         logger.warning("TELEGRAM_BOT_TOKEN not set, bot not started")
         return
-    bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    bot = _build_bot()
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     try:
