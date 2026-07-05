@@ -1,0 +1,13 @@
+[Unit]
+Description=Media Post Bot (FastAPI + aiogram)
+After=network.target mongod.service
+
+[Service]
+User=root
+WorkingDirectory=__APPDIR__/backend
+ExecStart=__APPDIR__/backend/venv/bin/uvicorn server:app --host 0.0.0.0 --port 8001
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

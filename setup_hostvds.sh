@@ -8,6 +8,16 @@ set -euo pipefail
 
 echo "==> [1/5] Обновление системы и базовые пакеты"
 export DEBIAN_FRONTEND=noninteractive
+
+echo "==> Swap 4G (если ещё нет)"
+if ! swapon --show 2>/dev/null | grep -q '/swapfile'; then
+    fallocate -l 4G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
 apt update
 apt install -y python3-venv python3-pip git nginx curl gnupg ca-certificates
 
