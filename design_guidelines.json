@@ -1,0 +1,77 @@
+{
+  "theme": "light",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "emotional_tone": "Objective, authoritative, efficient, and precise. A command center for content.",
+  "colors": {
+    "background_main": "#F9FAFB",
+    "background_surface": "#FFFFFF",
+    "text_primary": "#09090B",
+    "text_secondary": "#52525B",
+    "primary_accent": "#0055FF",
+    "status_published": "#00CC66",
+    "status_draft": "#FF3333",
+    "border_subtle": "#E4E4E7",
+    "hover_state": "#F4F4F5"
+  },
+  "typography": {
+    "font_family": {
+      "headings": "IBM Plex Sans, sans-serif",
+      "body": "IBM Plex Sans, sans-serif",
+      "mono": "IBM Plex Mono, monospace"
+    },
+    "rules": {
+      "headings": "Use radical weight contrast. H1/H2 must be font-black (900) and tightly tracked (tracking-tighter).",
+      "body": "font-normal for readability.",
+      "labels": "Uppercase, text-xs, tracking-[0.2em], font-bold."
+    },
+    "scale": {
+      "h1": "text-4xl sm:text-5xl font-black tracking-tighter",
+      "h2": "text-2xl sm:text-3xl font-bold tracking-tight",
+      "h3": "text-xl font-bold",
+      "body": "text-base",
+      "small": "text-sm text-zinc-500"
+    }
+  },
+  "layout": {
+    "spacing_system": "Generous padding internally, tight gaps between widgets. Use p-6 or p-8 for card internals. gap-4 or gap-6 for grids.",
+    "grid_strategy": "MODE B: THE 'CONTROL ROOM' GRID. Dense, data-heavy. grid-cols-1 md:grid-cols-3 lg:grid-cols-4. Stretch children to match height.",
+    "surface_strategy": "GRID BORDERS (The Technical Look). Expose the skeleton. Use flat solid surfaces. No Glassmorphism.",
+    "borders_and_radius": "Sharp edges. Use rounded-none or max rounded-sm (4px) for a brutalist, functional feel. 1px solid borders."
+  },
+  "components_instructions": {
+    "table": "Use Shadcn Table. Implement sortable columns. Left-align text, right-align numbers. Use inline status badges (Published/Draft) instead of plain text. Flat styling, no outer container shadows.",
+    "buttons": "Square edges (rounded-none). High contrast. Primary: bg-[#0055FF] text-white hover:bg-[#0033CC]. Secondary: bg-white text-zinc-900 border border-zinc-200 hover:bg-zinc-100.",
+    "cards": "Flat background (bg-white), 1px solid border (border-zinc-200), NO shadow by default. On hover: subtle shadow-sm and border darkens.",
+    "header": "Solid white background with a hard 1px bottom border. z-50 sticky top. Must include branding and navigation.",
+    "testing": "All interactive elements MUST have data-testid attributes (e.g., data-testid='copy-link-btn', data-testid='publish-status-badge')."
+  },
+  "motion": {
+    "general": "Minimalist. Snappy transitions for hover states. No bouncy animations. Optimize for speed.",
+    "hover": "transition-colors duration-150 ease-in-out"
+  },
+  "icons": {
+    "library": "lucide-react",
+    "instructions": "Use for inline actions (copy link, open external, publish), status indicators, and column headers. Keep stroke width crisp."
+  },
+  "images": {
+    "logo": {
+      "url": "https://images.unsplash.com/photo-1636051028886-0059ad2383c8?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxODl8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBhcHAlMjBsb2dvJTIwaWNvbiUyMHdoaXRlJTIwYmFja2dyb3VuZHxlbnwwfHx8fDE3ODMyNDk4ODJ8MA&ixlib=rb-4.1.0&q=85",
+      "description": "App logo for the header navigation"
+    },
+    "placeholders": [
+      {
+        "url": "https://images.unsplash.com/photo-1562408590-e32931084e23?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Njl8MHwxfHNlYXJjaHwyfHx0ZWNoJTIwbmV3cyUyMGFydGljbGUlMjBjb3ZlcnxlbnwwfHx8fDE3ODMyNDk4ODJ8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Mock thumbnail for Telegraph post item"
+      },
+      {
+        "url": "https://images.unsplash.com/photo-1550751827-4bd374c3f58b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Njl8MHwxfHNlYXJjaHwxfHx0ZWNoJTIwbmV3cyUyMGFydGljbGUlMjBjb3ZlcnxlbnwwfHx8fDE3ODMyNDk4ODJ8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Alternative mock thumbnail for Telegraph post item"
+      }
+    ]
+  },
+  "specific_functionality_views": {
+    "dashboard_stats": "Top row summary cards (Total Posts, Total Published). Col-span-1 each. Huge typography for numbers, sharp borders.",
+    "post_list": "Data table occupying col-span-full. Columns: Thumbnail (small 40x40 square), Title, Date, Telegraph Link (with inline copy icon), Telegram Channel Status (Badge). Row hover reveals 'View Details' action.",
+    "post_detail": "Slide-out panel (Sheet) or dedicated view. Shows full media count, complete telegraph link, and an explicit action to 'Publish to Channel'."
+  }
+}
