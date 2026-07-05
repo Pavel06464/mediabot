@@ -22,6 +22,7 @@ import {
   SheetContent,
   SheetHeader,
   SheetTitle,
+  SheetDescription,
 } from "@/components/ui/sheet";
 import {
   Table,
@@ -329,6 +330,9 @@ export default function Dashboard() {
                 <SheetTitle className="text-2xl font-black tracking-tight text-left">
                   {selected.title}
                 </SheetTitle>
+                <SheetDescription className="sr-only">
+                  Детали созданного поста Telegraph
+                </SheetDescription>
               </SheetHeader>
 
               <div className="mt-6 space-y-6">
