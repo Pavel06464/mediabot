@@ -23,6 +23,7 @@
 - 2026-07-05: MVP Telegram-бот (aiogram) + Telegraph + GridFS + дашборд (открытый). Тесты iteration_1 (11/11 + frontend).
 - 2026-07-05..13: Перенос на VPS HostVDS (скрипты, инструкция DEPLOYMENT_HOSTVDS.md). Поддержка Local Bot API Server + R2 в коде. Удалены внутренние пакеты (emergentintegrations, litellm) из requirements.
 - 2026-07-13: Dashboard-only переработка — JWT-авторизация, редактор постов в дашборде (текст/фото/видео/порядок/обложка), загрузка медиа (R2/GridFS), публикация в канал + настройка канала из дашборда. Тесты iteration_2 (backend 28/28, frontend 100%).
+- 2026-07-13: Редактор переработан в секции (Обложка/Описание/Фотографии/Видео) + drag-and-drop загрузка файлов из папки. Тесты iteration_3 (backend 29/29, frontend 100%). R2 на VPS проверен (токен + ключи + публичный доступ работают).
 
 ## Deployment status (user VPS 94.183.178.153)
 - Phase 1 (файлы до 20 МБ, GridFS) развёрнут и работал. 
