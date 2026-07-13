@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { useUpload } from "@/context/UploadContext";
+import { MarkdownToolbar } from "@/components/MarkdownToolbar";
 
 let idc = 0;
 const nid = () => `m${++idc}`;
@@ -42,6 +43,7 @@ export default function PostEditor() {
   const { startJob } = useUpload();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const descRef = useRef(null);
   const [cover, setCover] = useState(null); // {file, localUrl}
   const [photos, setPhotos] = useState([]);
   const [videos, setVideos] = useState([]);
@@ -125,8 +127,9 @@ export default function PostEditor() {
 
         <section>
           <h2 className="text-lg font-bold tracking-tight mb-3">Описание</h2>
-          <Textarea data-testid="editor-description" value={description} onChange={(e) => setDescription(e.target.value)}
-            placeholder="Текст статьи (необязательно)" className="rounded-none min-h-[120px]" />
+          <MarkdownToolbar textareaRef={descRef} value={description} onChange={setDescription} />
+          <Textarea ref={descRef} data-testid="editor-description" value={description} onChange={(e) => setDescription(e.target.value)}
+            placeholder="Текст статьи (необязательно). Поддержка: **жирный**, *курсив*, [ссылка](url), # заголовок, > цитата" className="rounded-none min-h-[120px]" />
         </section>
 
         <section>

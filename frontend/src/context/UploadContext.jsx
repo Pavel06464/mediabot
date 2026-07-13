@@ -40,13 +40,33 @@ export function UploadProvider({ children }) {
         patch(postId, (j) => ({ ...j, done: j.done + 1, pct: 0 }));
       } catch (err) {
         patch(postId, (j) => ({ ...j, status: "failed" }));
-        toast.error(`Ошибка загрузки файла ${k + 1}`);
+        toast.error(err.response?.data?.detail || `Ошибка загрузки файла ${k + 1}`);
         return;
       }
     }
-    patch(postId, (j) => ({ ...j, status: "done" }));
-    toast.success(meta.publish_after ? "Загрузка завершена — публикую в канал" : "Статья готова");
-    setTimeout(() => setJobs((prev) => prev.filter((x) => x.id !== postId)), 5000);
+
+    // Медиа загружены — сервер оформляет статью в Telegraph. Ждём готовности.
+    patch(postId, (j) => ({ ...j, status: "processing", pct: 100 }));
+    const finish = () => setTimeout(() => setJobs((prev) => prev.filter((x) => x.id !== postId)), 5000);
+    const poll = async () => {
+      try {
+        const { data } = await api.get(`/posts/${postId}`);
+        if (data.status === "ready" || data.status === "published") {
+          patch(postId, (j) => ({ ...j, status: "done" }));
+          toast.success(data.published ? `Опубликовано в «${data.channel_title}»` : "Статья готова");
+          finish();
+        } else if (data.status === "failed") {
+          patch(postId, (j) => ({ ...j, status: "failed" }));
+          toast.error(data.error || "Не удалось создать статью");
+          finish();
+        } else {
+          setTimeout(poll, 1500);
+        }
+      } catch {
+        setTimeout(poll, 2000);
+      }
+    };
+    poll();
   }, []);
 
   return <UploadContext.Provider value={{ jobs, startJob }}>{children}</UploadContext.Provider>;

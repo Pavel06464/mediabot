@@ -30,3 +30,7 @@ def upload_file(local_path: str, key: str, content_type: str) -> str:
         ExtraArgs={"ContentType": content_type},
     )
     return f"{os.environ['R2_PUBLIC_BASE'].rstrip('/')}/{key}"
+
+def delete_file(key: str) -> None:
+    """Remove an object from R2 by its key (best-effort)."""
+    _client().delete_object(Bucket=os.environ["R2_BUCKET"], Key=key)

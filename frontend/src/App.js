@@ -6,6 +6,7 @@ import { UploadProvider } from "@/context/UploadContext";
 import Login from "@/components/Login";
 import Dashboard from "@/components/Dashboard";
 import PostEditor from "@/components/PostEditor";
+import EditPost from "@/components/EditPost";
 
 function Protected({ children }) {
   const { user, loading } = useAuth();
@@ -25,6 +26,7 @@ function App() {
               <Route path="/login" element={<Login />} />
               <Route path="/" element={<Protected><Dashboard /></Protected>} />
               <Route path="/new" element={<Protected><PostEditor /></Protected>} />
+              <Route path="/edit/:id" element={<Protected><EditPost /></Protected>} />
             </Routes>
           </UploadProvider>
         </AuthProvider>

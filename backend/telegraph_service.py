@@ -1,5 +1,6 @@
 import html
 import logging
+import re
 
 from telegraph.aio import Telegraph
 
@@ -8,6 +9,37 @@ from database import db
 logger = logging.getLogger("telegraph_service")
 
 _telegraph = None
+
+
+def _inline_md(escaped: str) -> str:
+    """Apply inline markdown on already HTML-escaped text: links, bold, italic."""
+    escaped = re.sub(
+        r"\[([^\]]+)\]\((https?://[^\s)]+)\)",
+        lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>',
+        escaped,
+    )
+    escaped = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<i>\1</i>", escaped)
+    return escaped
+
+
+def md_to_html(text: str) -> str:
+    """Convert a lightweight markdown subset to Telegraph-safe HTML.
+    Supports: # H3, ## H4, > quote, **bold**, *italic*, [text](url)."""
+    out = []
+    for line in (text or "").split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("## "):
+            out.append(f"<h4>{_inline_md(html.escape(stripped[3:]))}</h4>")
+        elif stripped.startswith("# "):
+            out.append(f"<h3>{_inline_md(html.escape(stripped[2:]))}</h3>")
+        elif stripped.startswith("> "):
+            out.append(f"<blockquote>{_inline_md(html.escape(stripped[2:]))}</blockquote>")
+        else:
+            out.append(f"<p>{_inline_md(html.escape(line))}</p>")
+    return "".join(out)
 
 
 async def _get_telegraph() -> Telegraph:
@@ -39,9 +71,9 @@ def build_html(blocks, base_url: str) -> str:
     for b in blocks:
         t = b.get("type")
         if t == "text":
-            text = html.escape(b.get("value", "")).replace("\n", "<br>")
-            if text.strip():
-                parts.append(f"<p>{text}</p>")
+            frag = md_to_html(b.get("value", ""))
+            if frag:
+                parts.append(frag)
         elif t == "photo":
             url = b.get("url") or _media_url(base_url, b["media_id"])
             fig = f'<figure><img src="{url}"/>'

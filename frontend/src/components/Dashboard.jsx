@@ -18,6 +18,7 @@ import {
   Layers,
   Droplets,
   UploadCloud,
+  Pencil,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -52,11 +53,15 @@ const STATUS_META = {
 };
 
 const jobPct = (j) => {
-  if (!j.total) return j.status === "done" ? 100 : 0;
+  if (j.status === "processing" || j.status === "done") return 100;
+  if (!j.total) return 0;
   return Math.min(100, Math.round(((j.done + (j.pct || 0) / 100) / j.total) * 100));
 };
 const jobLabel = (j) =>
-  j.status === "failed" ? "Ошибка" : j.status === "done" ? "Готово" : "Загрузка…";
+  j.status === "failed" ? "Ошибка"
+    : j.status === "done" ? "Готово"
+    : j.status === "processing" ? "Оформляю статью…"
+    : "Загрузка…";
 
 function StatCard({ label, value, icon: Icon, accent, testid }) {
   return (
@@ -278,6 +283,9 @@ export default function Dashboard() {
                         <Button onClick={() => publish(p.id)} disabled={publishing === p.id || !p.telegraph_url} size="sm" className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white h-8 disabled:opacity-40" data-testid={`publish-${p.id}`}>
                           <Send className="h-3.5 w-3.5 mr-1.5" /> {p.published ? "Ещё раз" : "Опубликовать"}
                         </Button>
+                        <button onClick={() => navigate(`/edit/${p.id}`)} disabled={!p.telegraph_url} className="p-2 text-zinc-400 hover:text-[#0055FF] disabled:opacity-30 disabled:hover:text-zinc-400" title="Редактировать" data-testid={`edit-${p.id}`}>
+                          <Pencil className="h-4 w-4" />
+                        </button>
                         <button onClick={() => removePost(p.id)} className="p-2 text-zinc-400 hover:text-[#FF3333]" data-testid={`delete-${p.id}`}>
                           <Trash2 className="h-4 w-4" />
                         </button>

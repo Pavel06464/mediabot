@@ -21,7 +21,7 @@ import storage
 import auth
 import telegram_api
 import watermark
-from telegraph_service import create_post_page
+from telegraph_service import create_post_page, edit_post_page
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ class BlockIn(BaseModel):
     type: str  # text | photo | video
     url: Optional[str] = None
     media_id: Optional[str] = None
+    r2_key: Optional[str] = None
     caption: Optional[str] = ""
     value: Optional[str] = None
     is_cover: bool = False
@@ -67,6 +68,18 @@ class DraftIn(BaseModel):
     description: Optional[str] = ""
     publish_after: bool = False
     media: List[MediaDesc] = []
+
+
+class MediaEdit(BaseModel):
+    idx: int
+    caption: Optional[str] = ""
+    is_cover: bool = False
+
+
+class PostEditIn(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    media: List[MediaEdit] = []
 
 
 # ---------- Auth ----------
@@ -148,6 +161,7 @@ async def create_post(payload: PostIn, user=Depends(auth.get_current_user)):
         raise HTTPException(status_code=500, detail=f"Ошибка Telegraph: {e}")
 
     media_ids = [b["media_id"] for b in blocks if b.get("media_id")]
+    r2_keys = [b["r2_key"] for b in blocks if b.get("r2_key")]
     preview = next((b.get("value") for b in blocks if b.get("type") == "text" and b.get("value")), "")
     cover_block = next((b for b in blocks if b.get("is_cover") and b["type"] == "photo" and b.get("url")), None)
     if not cover_block:
@@ -163,6 +177,7 @@ async def create_post(payload: PostIn, user=Depends(auth.get_current_user)):
         "cover_url": cover_url,
         "media_count": sum(1 for b in blocks if b["type"] in ("photo", "video")),
         "media_ids": media_ids,
+        "r2_keys": r2_keys,
         "block_count": len(blocks),
         "preview": (preview or "")[:200],
         "published": False,
@@ -199,10 +214,38 @@ async def _store_bytes(content: bytes, ctype: str, kind: str, filename: str):
             url = await asyncio.to_thread(storage.upload_file, tmp.name, key, ctype)
         finally:
             os.unlink(tmp.name)
-        return url, None
+        return url, None, key
     bucket = get_gridfs()
     oid = await bucket.upload_from_stream(filename or kind, content, metadata={"content_type": ctype})
-    return f"{BASE_URL}/api/media/{oid}", str(oid)
+    return f"{BASE_URL}/api/media/{oid}", str(oid), None
+
+
+async def _stream_to_temp(file: UploadFile) -> tuple[str, int]:
+    """Stream an upload to a temp file in chunks (avoids holding big files in RAM)."""
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    size = 0
+    try:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            tmp.write(chunk)
+            size += len(chunk)
+    finally:
+        tmp.close()
+    return tmp.name, size
+
+
+async def _store_temp(path: str, ctype: str, kind: str, filename: str):
+    ext = os.path.splitext(filename or "")[1] or (".mp4" if kind == "video" else ".jpg")
+    if storage.r2_enabled():
+        key = f"{kind}/{uuid.uuid4()}{ext}"
+        url = await asyncio.to_thread(storage.upload_file, path, key, ctype)
+        return url, None, key
+    bucket = get_gridfs()
+    with open(path, "rb") as f:
+        oid = await bucket.upload_from_stream(filename or kind, f, metadata={"content_type": ctype})
+    return f"{BASE_URL}/api/media/{oid}", str(oid), None
 
 
 async def _finalize_post(post_id: str):
@@ -276,6 +319,7 @@ async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
         "cover_url": None,
         "blocks": blocks,
         "media_ids": [],
+        "r2_keys": [],
         "media_count": len(slots),
         "media_total": len(slots),
         "media_done": 0,
@@ -302,20 +346,41 @@ async def upload_media_slot(post_id: str, idx: int, file: UploadFile = File(...)
     if idx < 0 or idx >= len(blocks) or blocks[idx]["type"] not in ("photo", "video"):
         raise HTTPException(status_code=400, detail="Неверный слот")
 
-    content = await file.read()
+    slot_kind = blocks[idx]["type"]
     ctype = file.content_type or "application/octet-stream"
-    kind = "video" if ctype.startswith("video") else "photo"
-    if kind == "photo":
+    file_kind = "video" if ctype.startswith("video") else ("photo" if ctype.startswith("image") else None)
+    if file_kind != slot_kind:
+        expected = "видео" if slot_kind == "video" else "изображение"
+        raise HTTPException(status_code=400, detail=f"Ожидается {expected}, а получен файл типа «{ctype}»")
+
+    if slot_kind == "photo":
+        content = await file.read()
+        if len(content) > 25 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="Изображение больше 25 МБ")
         wm = await db.app_config.find_one({"_id": "watermark"})
         if wm and wm.get("enabled"):
             content = await asyncio.to_thread(watermark.apply_watermark, content, wm)
             ctype = "image/jpeg"
-    url, media_id = await _store_bytes(content, ctype, kind, file.filename or "")
+        url, media_id, r2_key = await _store_bytes(content, ctype, "photo", file.filename or "")
+    else:
+        path, size = await _stream_to_temp(file)
+        if size > 2 * 1024 * 1024 * 1024:
+            os.unlink(path)
+            raise HTTPException(status_code=400, detail="Видео больше 2 ГБ")
+        try:
+            url, media_id, r2_key = await _store_temp(path, ctype, "video", file.filename or "")
+        finally:
+            os.unlink(path)
 
     set_fields = {f"blocks.{idx}.url": url, f"blocks.{idx}.pending": False}
     if media_id:
         set_fields[f"blocks.{idx}.media_id"] = media_id
-    await db.posts.update_one({"id": post_id}, {"$set": set_fields, "$inc": {"media_done": 1}})
+    if r2_key:
+        set_fields[f"blocks.{idx}.r2_key"] = r2_key
+    update = {"$set": set_fields, "$inc": {"media_done": 1}}
+    if r2_key:
+        update["$push"] = {"r2_keys": r2_key}
+    await db.posts.update_one({"id": post_id}, update)
 
     updated = await db.posts.find_one({"id": post_id})
     if updated["media_done"] >= updated["media_total"]:
@@ -362,8 +427,84 @@ async def delete_post(post_id: str, user=Depends(auth.get_current_user)):
             await bucket.delete(ObjectId(mid))
         except Exception:
             pass
+    if storage.r2_enabled():
+        for key in post.get("r2_keys", []):
+            try:
+                await asyncio.to_thread(storage.delete_file, key)
+            except Exception:
+                logger.warning("R2 delete failed for key %s", key)
     await db.posts.delete_one({"id": post_id})
     return {"status": "deleted"}
+
+
+@api_router.get("/posts/{post_id}/edit")
+async def get_post_for_edit(post_id: str, user=Depends(auth.get_current_user)):
+    post = await db.posts.find_one({"id": post_id})
+    if not post:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    if not post.get("telegraph_path"):
+        raise HTTPException(status_code=400, detail="Статья ещё создаётся, редактирование недоступно")
+    blocks = post.get("blocks", [])
+    media = [
+        {"idx": i, "kind": b["type"], "url": b.get("url"), "caption": b.get("caption", ""), "is_cover": bool(b.get("is_cover"))}
+        for i, b in enumerate(blocks) if b["type"] in ("photo", "video")
+    ]
+    description = next((b.get("value", "") for b in blocks if b["type"] == "text"), "")
+    return {
+        "id": post["id"],
+        "title": post["title"],
+        "description": description,
+        "telegraph_url": post.get("telegraph_url"),
+        "media": media,
+    }
+
+
+@api_router.put("/posts/{post_id}")
+async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_current_user)):
+    if not payload.title.strip():
+        raise HTTPException(status_code=400, detail="Укажите заголовок")
+    post = await db.posts.find_one({"id": post_id})
+    if not post:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    if not post.get("telegraph_path"):
+        raise HTTPException(status_code=400, detail="Статья ещё создаётся, редактирование недоступно")
+    blocks = post.get("blocks", [])
+
+    for m in payload.media:
+        if 0 <= m.idx < len(blocks) and blocks[m.idx]["type"] in ("photo", "video"):
+            blocks[m.idx]["caption"] = m.caption or ""
+            blocks[m.idx]["is_cover"] = bool(m.is_cover)
+
+    desc = (payload.description or "").strip()
+    text_idx = next((i for i, b in enumerate(blocks) if b["type"] == "text"), None)
+    if text_idx is not None:
+        blocks[text_idx]["value"] = desc
+    elif desc:
+        blocks.insert(0, {"type": "text", "value": desc})
+
+    cover_idx = next((i for i, b in enumerate(blocks) if b.get("is_cover") and b["type"] == "photo" and b.get("url")), None)
+    ordered = [blocks[cover_idx]] + [b for i, b in enumerate(blocks) if i != cover_idx] if cover_idx is not None else blocks
+    try:
+        url, path = await edit_post_page(post["telegraph_path"], payload.title.strip(), ordered, BASE_URL)
+    except Exception as e:
+        logger.exception("edit telegraph failed")
+        raise HTTPException(status_code=500, detail=f"Ошибка Telegraph: {e}")
+
+    cover_block = next((b for b in blocks if b.get("is_cover") and b["type"] == "photo" and b.get("url")), None)
+    if not cover_block:
+        cover_block = next((b for b in blocks if b["type"] == "photo" and b.get("url")), None)
+    await db.posts.update_one(
+        {"id": post_id},
+        {"$set": {
+            "title": payload.title.strip(),
+            "blocks": blocks,
+            "telegraph_url": url,
+            "telegraph_path": path,
+            "cover_url": cover_block["url"] if cover_block else None,
+            "preview": desc[:200],
+        }},
+    )
+    return {"status": "updated", "telegraph_url": url}
 
 
 # ---------- Upload ----------
