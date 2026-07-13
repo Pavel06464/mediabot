@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/table";
 import api from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
+import { useUpload } from "@/context/UploadContext";
 import ChannelSettings from "@/components/ChannelSettings";
 import WatermarkSettings from "@/components/WatermarkSettings";
 

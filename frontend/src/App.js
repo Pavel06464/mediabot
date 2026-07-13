@@ -2,6 +2,7 @@ import "@/App.css";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
 import { AuthProvider, useAuth } from "@/context/AuthContext";
+import { UploadProvider } from "@/context/UploadContext";
 import Login from "@/components/Login";
 import Dashboard from "@/components/Dashboard";
 import PostEditor from "@/components/PostEditor";
@@ -19,11 +20,13 @@ function App() {
       <Toaster position="top-right" richColors />
       <BrowserRouter>
         <AuthProvider>
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route path="/" element={<Protected><Dashboard /></Protected>} />
-            <Route path="/new" element={<Protected><PostEditor /></Protected>} />
-          </Routes>
+          <UploadProvider>
+            <Routes>
+              <Route path="/login" element={<Login />} />
+              <Route path="/" element={<Protected><Dashboard /></Protected>} />
+              <Route path="/new" element={<Protected><PostEditor /></Protected>} />
+            </Routes>
+          </UploadProvider>
         </AuthProvider>
       </BrowserRouter>
     </div>

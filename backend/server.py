@@ -56,6 +56,19 @@ class ChannelIn(BaseModel):
     identifier: str
 
 
+class MediaDesc(BaseModel):
+    kind: str  # photo | video
+    is_cover: bool = False
+    caption: Optional[str] = ""
+
+
+class DraftIn(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    publish_after: bool = False
+    media: List[MediaDesc] = []
+
+
 # ---------- Auth ----------
 @api_router.post("/auth/login")
 async def login(payload: LoginIn):
@@ -99,12 +112,12 @@ async def get_stats(user=Depends(auth.get_current_user)):
 # ---------- Posts ----------
 @api_router.get("/posts")
 async def get_posts(limit: int = 100, user=Depends(auth.get_current_user)):
-    return await db.posts.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    return await db.posts.find({}, {"_id": 0, "blocks": 0}).sort("created_at", -1).to_list(limit)
 
 
 @api_router.get("/posts/{post_id}")
 async def get_post(post_id: str, user=Depends(auth.get_current_user)):
-    post = await db.posts.find_one({"id": post_id}, {"_id": 0})
+    post = await db.posts.find_one({"id": post_id}, {"_id": 0, "blocks": 0})
     if not post:
         raise HTTPException(status_code=404, detail="Пост не найден")
     return post
@@ -161,30 +174,174 @@ async def create_post(payload: PostIn, user=Depends(auth.get_current_user)):
     return doc
 
 
+async def _do_publish(post: dict, channel: dict):
+    caption = f"<b>{post['title']}</b>\n\n{post['telegraph_url']}"
+    if post.get("cover_url"):
+        try:
+            await telegram_api.send_photo(channel["channel_id"], post["cover_url"], caption)
+        except Exception as e:
+            logger.warning("sendPhoto failed, fallback to sendMessage: %s", e)
+            await telegram_api.send_message(channel["channel_id"], caption)
+    else:
+        await telegram_api.send_message(channel["channel_id"], caption)
+
+
+async def _store_bytes(content: bytes, ctype: str, kind: str, filename: str):
+    ext = os.path.splitext(filename or "")[1] or (".mp4" if kind == "video" else ".jpg")
+    if kind == "photo" and ctype == "image/jpeg":
+        ext = ".jpg"
+    if storage.r2_enabled():
+        key = f"{kind}/{uuid.uuid4()}{ext}"
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        tmp.write(content)
+        tmp.close()
+        try:
+            url = await asyncio.to_thread(storage.upload_file, tmp.name, key, ctype)
+        finally:
+            os.unlink(tmp.name)
+        return url, None
+    bucket = get_gridfs()
+    oid = await bucket.upload_from_stream(filename or kind, content, metadata={"content_type": ctype})
+    return f"{BASE_URL}/api/media/{oid}", str(oid)
+
+
+async def _finalize_post(post_id: str):
+    post = await db.posts.find_one({"id": post_id})
+    if not post or post.get("status") not in ("uploading", "processing"):
+        return
+    blocks = post.get("blocks", [])
+    cover_idx = next((i for i, b in enumerate(blocks) if b.get("is_cover") and b["type"] == "photo" and b.get("url")), None)
+    if cover_idx is not None:
+        ordered = [blocks[cover_idx]] + [b for i, b in enumerate(blocks) if i != cover_idx]
+    else:
+        ordered = blocks
+    try:
+        url, path = await create_post_page(post["title"], ordered, BASE_URL)
+    except Exception as e:
+        logger.exception("finalize telegraph failed")
+        await db.posts.update_one({"id": post_id}, {"$set": {"status": "failed", "error": str(e)}})
+        return
+    cover_block = next((b for b in blocks if b.get("is_cover") and b["type"] == "photo" and b.get("url")), None)
+    if not cover_block:
+        cover_block = next((b for b in blocks if b["type"] == "photo" and b.get("url")), None)
+    media_ids = [b["media_id"] for b in blocks if b.get("media_id")]
+    upd = {
+        "telegraph_url": url,
+        "telegraph_path": path,
+        "cover_url": cover_block["url"] if cover_block else None,
+        "media_ids": media_ids,
+        "status": "ready",
+    }
+    published = False
+    channel_title = None
+    if post.get("publish_after"):
+        channel = await db.app_config.find_one({"_id": "channel"})
+        if channel:
+            try:
+                merged = {**post, **upd}
+                await _do_publish(merged, channel)
+                published = True
+                channel_title = channel.get("channel_title")
+                upd["status"] = "published"
+            except Exception as e:
+                logger.warning("auto-publish failed: %s", e)
+                upd["error"] = f"Публикация не удалась: {e}"
+    upd["published"] = published
+    upd["channel_title"] = channel_title
+    await db.posts.update_one({"id": post_id}, {"$set": upd})
+
+
+@api_router.post("/posts/draft")
+async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
+    if not payload.title.strip():
+        raise HTTPException(status_code=400, detail="Укажите заголовок")
+    blocks = []
+    if payload.description and payload.description.strip():
+        blocks.append({"type": "text", "value": payload.description.strip()})
+    slots = []
+    for m in payload.media:
+        idx = len(blocks)
+        blocks.append({
+            "type": m.kind, "is_cover": m.is_cover, "caption": m.caption or "",
+            "url": None, "media_id": None, "pending": True,
+        })
+        slots.append(idx)
+    post_id = str(uuid.uuid4())
+    doc = {
+        "id": post_id,
+        "user_id": user["id"],
+        "title": payload.title.strip(),
+        "telegraph_url": None,
+        "telegraph_path": None,
+        "cover_url": None,
+        "blocks": blocks,
+        "media_ids": [],
+        "media_count": len(slots),
+        "media_total": len(slots),
+        "media_done": 0,
+        "block_count": len(blocks),
+        "preview": (payload.description or "")[:200],
+        "publish_after": payload.publish_after,
+        "published": False,
+        "channel_title": None,
+        "status": "uploading" if slots else "processing",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.posts.insert_one(doc)
+    if not slots:
+        await _finalize_post(post_id)
+    return {"id": post_id, "slots": slots}
+
+
+@api_router.post("/posts/{post_id}/media/{idx}")
+async def upload_media_slot(post_id: str, idx: int, file: UploadFile = File(...), user=Depends(auth.get_current_user)):
+    post = await db.posts.find_one({"id": post_id})
+    if not post:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    blocks = post.get("blocks", [])
+    if idx < 0 or idx >= len(blocks) or blocks[idx]["type"] not in ("photo", "video"):
+        raise HTTPException(status_code=400, detail="Неверный слот")
+
+    content = await file.read()
+    ctype = file.content_type or "application/octet-stream"
+    kind = "video" if ctype.startswith("video") else "photo"
+    if kind == "photo":
+        wm = await db.app_config.find_one({"_id": "watermark"})
+        if wm and wm.get("enabled"):
+            content = await asyncio.to_thread(watermark.apply_watermark, content, wm)
+            ctype = "image/jpeg"
+    url, media_id = await _store_bytes(content, ctype, kind, file.filename or "")
+
+    set_fields = {f"blocks.{idx}.url": url, f"blocks.{idx}.pending": False}
+    if media_id:
+        set_fields[f"blocks.{idx}.media_id"] = media_id
+    await db.posts.update_one({"id": post_id}, {"$set": set_fields, "$inc": {"media_done": 1}})
+
+    updated = await db.posts.find_one({"id": post_id})
+    if updated["media_done"] >= updated["media_total"] and updated.get("status") == "uploading":
+        await db.posts.update_one({"id": post_id}, {"$set": {"status": "processing"}})
+        await _finalize_post(post_id)
+    out = await db.posts.find_one({"id": post_id}, {"_id": 0, "blocks": 0})
+    return out
+
+
 @api_router.post("/posts/{post_id}/publish")
 async def publish_post(post_id: str, user=Depends(auth.get_current_user)):
     post = await db.posts.find_one({"id": post_id})
     if not post:
         raise HTTPException(status_code=404, detail="Пост не найден")
+    if not post.get("telegraph_url"):
+        raise HTTPException(status_code=400, detail="Статья ещё создаётся, подождите")
     channel = await db.app_config.find_one({"_id": "channel"})
     if not channel:
         raise HTTPException(status_code=400, detail="Сначала настройте канал в настройках")
-    caption = f"<b>{post['title']}</b>\n\n{post['telegraph_url']}"
     try:
-        if post.get("cover_url"):
-            # Отправляем обложку картинкой -> гарантированно большой предпросмотр
-            try:
-                await telegram_api.send_photo(channel["channel_id"], post["cover_url"], caption)
-            except Exception as e:
-                logger.warning("sendPhoto failed, fallback to sendMessage: %s", e)
-                await telegram_api.send_message(channel["channel_id"], caption)
-        else:
-            await telegram_api.send_message(channel["channel_id"], caption)
+        await _do_publish(post, channel)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка публикации: {e}")
     await db.posts.update_one(
         {"id": post_id},
-        {"$set": {"published": True, "channel_title": channel.get("channel_title")}},
+        {"$set": {"published": True, "status": "published", "channel_title": channel.get("channel_title")}},
     )
     return {"status": "published", "channel_title": channel.get("channel_title")}
 
