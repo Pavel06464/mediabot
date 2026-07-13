@@ -1,0 +1,28 @@
+{
+  "summary": "Full e2e test of the new dashboard-only Media Post Bot with JWT auth. Backend: 28/28 pytest tests pass (/api/auth/login+me, auth gating on stats/posts/settings/upload, stats schema, posts CRUD, upload+GridFS media fetch, create-with-cover ordering, telegraph article generation, publish without channel returns 400, channel-set without bot token returns 400, delete). Frontend: Playwright end-to-end run of login → dashboard → editor → upload photo → mark cover → save → verify row/telegraph link/embedded image → copy → publish (graceful 400 dialog) → channel dialog (graceful 400) → delete → logout → protected-route redirect. All pass.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_api.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py still uses deprecated FastAPI on_event('startup'). Migrate to lifespan context manager (non-blocking, no functional impact).",
+    "auth.get_current_user re-queries db.users on every request; consider a light cache or trust JWT claim to reduce Mongo load (minor perf).",
+    "storage.py has no delete_from_r2 counterpart — DELETE /api/posts only wipes GridFS blobs; if R2 becomes enabled on VPS, orphaned R2 keys will accumulate. Add a delete helper before shipping to prod with R2.",
+    "publish_post catches any Telegram exception as HTTP 400; malformed chat IDs still return 400 which is fine, but could log the underlying error for prod diagnosis (currently swallowed).",
+    "CORS middleware order: `app.include_router(api_router)` before `add_middleware` — Starlette applies middleware regardless of order but placing add_middleware BEFORE include_router is the idiomatic pattern.",
+    "JWT_SECRET is present in preview .env but has no rotation strategy — acceptable, note for prod.",
+    "PostEditor: local `let idc = 0` monotonically increases per module load; if the SPA never full-reloads (client-side navigation), IDs stay unique but restart on hard refresh — fine.",
+    "ChannelSettings dialog: no visible loading state for the initial GET /api/settings (only 'Проверка...' on save). Minor UX polish."
+  ],
+  "updated_files": ["/app/backend/tests/test_api.py"],
+  "success_rate": {"backend": "100% (28/28)", "frontend": "100% (all e2e steps)"},
+  "test_credentials": "admin@mediabot.local / admin123 (from /app/memory/test_credentials.md — verified working)",
+  "seed_data_creation": "Test post 'TEST_ UI E2E пост с обложкой' was created and then deleted at end of the Playwright run. Test post 'TEST_ pytest article' created and deleted by pytest TestFullFlow. No leftover state. GridFS media created during upload tests is deleted along with the parent post.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "All backend endpoints require Bearer JWT except /api/, /api/auth/login, and /api/media/{id} (public so Telegraph can fetch GridFS media). Test file pytest.ini pins xdist to loadscope — put any state-dependent test chain inside a single TestClass so shared class state stays on one worker. Use TestFullFlow.state dict pattern (already used). TELEGRAM_BOT_TOKEN is intentionally empty in preview: publish and set-channel both return 400 with clear messages — these are EXPECTED and NOT bugs. Post creation actually calls telegra.ph (network) — first call in a fresh DB creates a Telegraph account and stores access_token in db.app_config; subsequent calls reuse it. If Telegraph is unreachable the create_post test would fail with 500.",
+  "rca_of_the_issue": "N/A — no issues found"
+}

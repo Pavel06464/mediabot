@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
-import axios from "axios";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
-  Send,
+  Plus,
   FileText,
   Radio,
   Image as ImageIcon,
@@ -12,18 +12,13 @@ import {
   Trash2,
   RefreshCw,
   Bot,
-  ArrowUpRight,
+  Send,
+  Settings,
+  LogOut,
   Layers,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetDescription,
-} from "@/components/ui/sheet";
 import {
   Table,
   TableBody,
@@ -32,102 +27,82 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
+import api from "@/lib/api";
+import { useAuth } from "@/context/AuthContext";
+import ChannelSettings from "@/components/ChannelSettings";
 
 const fmtDate = (iso) => {
   try {
     return new Date(iso).toLocaleString("ru-RU", {
-      day: "2-digit",
-      month: "short",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
+      day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
     });
-  } catch {
-    return iso;
-  }
+  } catch { return iso; }
 };
 
 function StatCard({ label, value, icon: Icon, accent, testid }) {
   return (
-    <div
-      data-testid={testid}
-      className="bg-white border border-zinc-200 p-6 flex flex-col justify-between hover:border-zinc-400 transition-colors duration-150"
-    >
+    <div data-testid={testid} className="bg-white border border-zinc-200 p-6 flex flex-col justify-between hover:border-zinc-400 transition-colors duration-150">
       <div className="flex items-center justify-between">
         <span className="label-caps text-zinc-500">{label}</span>
         <Icon className="h-4 w-4 text-zinc-400" strokeWidth={2} />
       </div>
-      <div
-        className="mt-6 text-5xl font-black tracking-tighter"
-        style={{ color: accent || "#09090B" }}
-      >
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function MediaBadge({ post }) {
-  return (
-    <div className="flex items-center gap-1.5 text-zinc-600">
-      <Layers className="h-3.5 w-3.5" strokeWidth={2} />
-      <span className="text-sm font-medium">{post.media_count}</span>
+      <div className="mt-6 text-5xl font-black tracking-tighter" style={{ color: accent || "#09090B" }}>{value}</div>
     </div>
   );
 }
 
 export default function Dashboard() {
+  const navigate = useNavigate();
+  const { logout } = useAuth();
   const [stats, setStats] = useState(null);
   const [posts, setPosts] = useState([]);
-  const [channels, setChannels] = useState([]);
-  const [selected, setSelected] = useState(null);
+  const [channel, setChannel] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [publishing, setPublishing] = useState(null);
+  const [channelOpen, setChannelOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const [s, p, c] = await Promise.all([
-        axios.get(`${API}/stats`),
-        axios.get(`${API}/posts`),
-        axios.get(`${API}/channels`),
+        api.get("/stats"), api.get("/posts"), api.get("/settings"),
       ]);
       setStats(s.data);
       setPosts(p.data);
-      setChannels(c.data);
+      setChannel(c.data.channel_id ? c.data : null);
     } catch (e) {
-      toast.error("Не удалось загрузить данные");
+      // 401 handled by interceptor
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 15000);
-    return () => clearInterval(t);
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
 
-  const copyLink = (url) => {
-    navigator.clipboard.writeText(url);
-    toast.success("Ссылка скопирована");
+  const copyLink = (url) => { navigator.clipboard.writeText(url); toast.success("Ссылка скопирована"); };
+
+  const publish = async (id) => {
+    if (!channel) { toast.error("Сначала настройте канал"); setChannelOpen(true); return; }
+    setPublishing(id);
+    try {
+      const { data } = await api.post(`/posts/${id}/publish`);
+      toast.success(`Опубликовано в «${data.channel_title}»`);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Ошибка публикации");
+    } finally {
+      setPublishing(null);
+    }
   };
 
   const removePost = async (id) => {
-    try {
-      await axios.delete(`${API}/posts/${id}`);
-      toast.success("Пост удалён");
-      setSelected(null);
-      load();
-    } catch {
-      toast.error("Ошибка удаления");
-    }
+    try { await api.delete(`/posts/${id}`); toast.success("Пост удалён"); load(); }
+    catch { toast.error("Ошибка удаления"); }
   };
 
   return (
     <div className="min-h-screen bg-[#F9FAFB]">
-      {/* Header */}
+      <ChannelSettings open={channelOpen} onOpenChange={setChannelOpen} onChange={load} />
+
       <header className="sticky top-0 z-50 bg-white border-b border-zinc-200">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -135,88 +110,46 @@ export default function Dashboard() {
               <Bot className="h-5 w-5 text-white" strokeWidth={2.2} />
             </div>
             <div>
-              <div className="text-base font-black tracking-tighter leading-none">
-                MEDIA POST BOT
-              </div>
-              <div className="label-caps text-zinc-400 mt-0.5">
-                Telegraph Control Room
-              </div>
+              <div className="text-base font-black tracking-tighter leading-none">MEDIA POST BOT</div>
+              <div className="label-caps text-zinc-400 mt-0.5">Telegraph Control Room</div>
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            <a
-              href="https://t.me/pdmtelegraphbot"
-              target="_blank"
-              rel="noreferrer"
-              data-testid="open-bot-link"
-            >
-              <Button
-                variant="outline"
-                className="rounded-none border-zinc-200 hover:bg-zinc-100"
-              >
-                <Send className="h-4 w-4 mr-2" /> Открыть бота
-              </Button>
-            </a>
-            <Button
-              onClick={load}
-              className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white"
-              data-testid="refresh-btn"
-            >
+          <div className="flex items-center gap-2">
+            <Button onClick={() => setChannelOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="channel-settings-btn">
+              <Settings className="h-4 w-4 mr-2" /> {channel ? channel.channel_title : "Канал"}
+            </Button>
+            <Button onClick={load} variant="outline" className="rounded-none border-zinc-200" data-testid="refresh-btn">
               <RefreshCw className="h-4 w-4" />
+            </Button>
+            <Button onClick={logout} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="logout-btn">
+              <LogOut className="h-4 w-4" />
             </Button>
           </div>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-8">
-        <div className="mb-8">
-          <h1 className="text-4xl sm:text-5xl font-black tracking-tighter">
-            Панель постов
-          </h1>
-          <p className="text-zinc-500 mt-2 max-w-2xl">
-            Все статьи Telegraph, созданные через вашего Telegram-бота, с ссылками
-            для публикации и статусом канала.
-          </p>
+        <div className="flex items-start justify-between mb-8 gap-4 flex-wrap">
+          <div>
+            <h1 className="text-4xl sm:text-5xl font-black tracking-tighter">Панель постов</h1>
+            <p className="text-zinc-500 mt-2 max-w-2xl">Создавайте статьи Telegraph с медиа и публикуйте их в канал прямо отсюда.</p>
+          </div>
+          <Button onClick={() => navigate("/new")} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="new-post-btn">
+            <Plus className="h-4 w-4 mr-2" /> Новый пост
+          </Button>
         </div>
 
-        {/* Stats */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-          <StatCard
-            label="Всего постов"
-            value={stats?.total_posts ?? "—"}
-            icon={FileText}
-            testid="stat-total"
-          />
-          <StatCard
-            label="Опубликовано"
-            value={stats?.total_published ?? "—"}
-            icon={Radio}
-            accent="#00CC66"
-            testid="stat-published"
-          />
-          <StatCard
-            label="Черновики"
-            value={stats?.total_drafts ?? "—"}
-            icon={FileText}
-            accent="#FF3333"
-            testid="stat-drafts"
-          />
-          <StatCard
-            label="Медиа-файлов"
-            value={stats?.total_media ?? "—"}
-            icon={ImageIcon}
-            accent="#0055FF"
-            testid="stat-media"
-          />
+          <StatCard label="Всего постов" value={stats?.total_posts ?? "—"} icon={FileText} testid="stat-total" />
+          <StatCard label="Опубликовано" value={stats?.total_published ?? "—"} icon={Radio} accent="#00CC66" testid="stat-published" />
+          <StatCard label="Черновики" value={stats?.total_drafts ?? "—"} icon={FileText} accent="#FF3333" testid="stat-drafts" />
+          <StatCard label="Медиа-файлов" value={stats?.total_media ?? "—"} icon={ImageIcon} accent="#0055FF" testid="stat-media" />
         </div>
 
-        {/* Posts table */}
         <div className="bg-white border border-zinc-200" data-testid="posts-table">
           <div className="px-6 py-4 border-b border-zinc-200 flex items-center justify-between">
             <span className="label-caps text-zinc-500">История постов</span>
-            <span className="text-sm text-zinc-400">
-              {channels.length} канал(ов) подключено
-            </span>
+            <span className="text-sm text-zinc-400">{channel ? `Канал: ${channel.channel_title}` : "Канал не настроен"}</span>
           </div>
 
           {loading ? (
@@ -225,9 +158,9 @@ export default function Dashboard() {
             <div className="p-16 text-center">
               <FileText className="h-10 w-10 text-zinc-300 mx-auto mb-4" />
               <p className="text-zinc-500 font-medium">Постов пока нет</p>
-              <p className="text-zinc-400 text-sm mt-1">
-                Создайте первый пост в Telegram-боте — он появится здесь.
-              </p>
+              <Button onClick={() => navigate("/new")} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white mt-4">
+                <Plus className="h-4 w-4 mr-2" /> Создать первый пост
+              </Button>
             </div>
           ) : (
             <Table>
@@ -239,78 +172,50 @@ export default function Dashboard() {
                   <TableHead className="label-caps text-zinc-500 text-center">Медиа</TableHead>
                   <TableHead className="label-caps text-zinc-500">Ссылка</TableHead>
                   <TableHead className="label-caps text-zinc-500">Статус</TableHead>
+                  <TableHead className="label-caps text-zinc-500 text-right">Действия</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {posts.map((p) => (
-                  <TableRow
-                    key={p.id}
-                    className="border-zinc-100 cursor-pointer hover:bg-zinc-50 transition-colors duration-150 group"
-                    onClick={() => setSelected(p)}
-                    data-testid={`post-row-${p.id}`}
-                  >
+                  <TableRow key={p.id} className="border-zinc-100 hover:bg-zinc-50 transition-colors duration-150" data-testid={`post-row-${p.id}`}>
                     <TableCell>
                       <div className="h-10 w-10 bg-zinc-900 flex items-center justify-center">
-                        {p.media_count > 0 ? (
-                          <Film className="h-4 w-4 text-white" />
-                        ) : (
-                          <FileText className="h-4 w-4 text-white" />
-                        )}
+                        {p.media_count > 0 ? <Film className="h-4 w-4 text-white" /> : <FileText className="h-4 w-4 text-white" />}
                       </div>
                     </TableCell>
-                    <TableCell className="font-semibold max-w-[280px] truncate">
-                      {p.title}
-                    </TableCell>
-                    <TableCell className="text-sm text-zinc-500 whitespace-nowrap">
-                      {fmtDate(p.created_at)}
-                    </TableCell>
+                    <TableCell className="font-semibold max-w-[240px] truncate">{p.title}</TableCell>
+                    <TableCell className="text-sm text-zinc-500 whitespace-nowrap">{fmtDate(p.created_at)}</TableCell>
                     <TableCell className="text-center">
-                      <div className="flex justify-center">
-                        <MediaBadge post={p} />
+                      <div className="flex justify-center items-center gap-1.5 text-zinc-600">
+                        <Layers className="h-3.5 w-3.5" /> <span className="text-sm font-medium">{p.media_count}</span>
                       </div>
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-2">
-                        <a
-                          href={p.telegraph_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          className="text-[#0055FF] font-mono text-xs hover:underline flex items-center gap-1"
-                          data-testid={`open-link-${p.id}`}
-                        >
-                          {p.telegraph_url.replace("https://", "")}
-                          <ExternalLink className="h-3 w-3" />
+                        <a href={p.telegraph_url} target="_blank" rel="noreferrer" className="text-[#0055FF] font-mono text-xs hover:underline flex items-center gap-1" data-testid={`open-link-${p.id}`}>
+                          {p.telegraph_url.replace("https://", "").slice(0, 22)}… <ExternalLink className="h-3 w-3" />
                         </a>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            copyLink(p.telegraph_url);
-                          }}
-                          className="text-zinc-400 hover:text-zinc-900 transition-colors"
-                          data-testid={`copy-link-${p.id}`}
-                        >
+                        <button onClick={() => copyLink(p.telegraph_url)} className="text-zinc-400 hover:text-zinc-900" data-testid={`copy-link-${p.id}`}>
                           <Copy className="h-3.5 w-3.5" />
                         </button>
                       </div>
                     </TableCell>
                     <TableCell>
                       {p.published ? (
-                        <Badge
-                          className="rounded-none bg-[#00CC66] hover:bg-[#00CC66] text-white font-bold"
-                          data-testid={`status-${p.id}`}
-                        >
-                          В КАНАЛЕ
-                        </Badge>
+                        <Badge className="rounded-none bg-[#00CC66] hover:bg-[#00CC66] text-white font-bold" data-testid={`status-${p.id}`}>В КАНАЛЕ</Badge>
                       ) : (
-                        <Badge
-                          variant="outline"
-                          className="rounded-none border-zinc-300 text-zinc-500 font-bold"
-                          data-testid={`status-${p.id}`}
-                        >
-                          ЧЕРНОВИК
-                        </Badge>
+                        <Badge variant="outline" className="rounded-none border-zinc-300 text-zinc-500 font-bold" data-testid={`status-${p.id}`}>ЧЕРНОВИК</Badge>
                       )}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        <Button onClick={() => publish(p.id)} disabled={publishing === p.id} size="sm" className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white h-8" data-testid={`publish-${p.id}`}>
+                          <Send className="h-3.5 w-3.5 mr-1.5" /> {p.published ? "Ещё раз" : "Опубликовать"}
+                        </Button>
+                        <button onClick={() => removePost(p.id)} className="p-2 text-zinc-400 hover:text-[#FF3333]" data-testid={`delete-${p.id}`}>
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -319,103 +224,6 @@ export default function Dashboard() {
           )}
         </div>
       </main>
-
-      {/* Detail sheet */}
-      <Sheet open={!!selected} onOpenChange={(o) => !o && setSelected(null)}>
-        <SheetContent className="rounded-none sm:max-w-lg overflow-y-auto" data-testid="post-detail">
-          {selected && (
-            <>
-              <SheetHeader>
-                <span className="label-caps text-zinc-400">Детали поста</span>
-                <SheetTitle className="text-2xl font-black tracking-tight text-left">
-                  {selected.title}
-                </SheetTitle>
-                <SheetDescription className="sr-only">
-                  Детали созданного поста Telegraph
-                </SheetDescription>
-              </SheetHeader>
-
-              <div className="mt-6 space-y-6">
-                <div className="flex items-center gap-2">
-                  {selected.published ? (
-                    <Badge className="rounded-none bg-[#00CC66] text-white font-bold">
-                      ОПУБЛИКОВАН
-                    </Badge>
-                  ) : (
-                    <Badge variant="outline" className="rounded-none border-zinc-300 font-bold">
-                      ЧЕРНОВИК
-                    </Badge>
-                  )}
-                  {selected.channel_title && (
-                    <span className="text-sm text-zinc-500">
-                      → {selected.channel_title}
-                    </span>
-                  )}
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="border border-zinc-200 p-4">
-                    <span className="label-caps text-zinc-400">Медиа</span>
-                    <div className="text-2xl font-black mt-1">{selected.media_count}</div>
-                  </div>
-                  <div className="border border-zinc-200 p-4">
-                    <span className="label-caps text-zinc-400">Блоков</span>
-                    <div className="text-2xl font-black mt-1">{selected.block_count}</div>
-                  </div>
-                </div>
-
-                {selected.preview && (
-                  <div>
-                    <span className="label-caps text-zinc-400">Превью текста</span>
-                    <p className="mt-2 text-sm text-zinc-600 border-l-2 border-zinc-200 pl-3">
-                      {selected.preview}
-                    </p>
-                  </div>
-                )}
-
-                <div>
-                  <span className="label-caps text-zinc-400">Ссылка Telegraph</span>
-                  <div className="mt-2 flex items-center gap-2 border border-zinc-200 p-3">
-                    <span className="font-mono text-xs text-zinc-700 truncate flex-1">
-                      {selected.telegraph_url}
-                    </span>
-                    <button
-                      onClick={() => copyLink(selected.telegraph_url)}
-                      className="text-zinc-400 hover:text-zinc-900"
-                      data-testid="detail-copy-link"
-                    >
-                      <Copy className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex flex-col gap-2 pt-2">
-                  <a href={selected.telegraph_url} target="_blank" rel="noreferrer">
-                    <Button
-                      className="w-full rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white"
-                      data-testid="detail-open-btn"
-                    >
-                      Открыть статью <ArrowUpRight className="h-4 w-4 ml-2" />
-                    </Button>
-                  </a>
-                  <Button
-                    variant="outline"
-                    onClick={() => removePost(selected.id)}
-                    className="w-full rounded-none border-zinc-200 text-[#FF3333] hover:bg-red-50 hover:text-[#FF3333]"
-                    data-testid="detail-delete-btn"
-                  >
-                    <Trash2 className="h-4 w-4 mr-2" /> Удалить пост
-                  </Button>
-                </div>
-
-                <p className="text-xs text-zinc-400 pt-4 border-t border-zinc-100">
-                  Публикация в канал доступна прямо в Telegram-боте после создания поста.
-                </p>
-              </div>
-            </>
-          )}
-        </SheetContent>
-      </Sheet>
     </div>
   );
 }
