@@ -17,6 +17,7 @@ import {
   LogOut,
   Layers,
   Droplets,
+  UploadCloud,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -42,6 +43,21 @@ const fmtDate = (iso) => {
   } catch { return iso; }
 };
 
+const STATUS_META = {
+  uploading: { label: "ЗАГРУЗКА", cls: "border-[#0055FF] text-[#0055FF]" },
+  processing: { label: "СОЗДАЁТСЯ", cls: "border-amber-400 text-amber-600" },
+  ready: { label: "ГОТОВ", cls: "border-zinc-300 text-zinc-500" },
+  published: { label: "В КАНАЛЕ", cls: "bg-[#00CC66] text-white border-transparent" },
+  failed: { label: "ОШИБКА", cls: "border-[#FF3333] text-[#FF3333]" },
+};
+
+const jobPct = (j) => {
+  if (!j.total) return j.status === "done" ? 100 : 0;
+  return Math.min(100, Math.round(((j.done + (j.pct || 0) / 100) / j.total) * 100));
+};
+const jobLabel = (j) =>
+  j.status === "failed" ? "Ошибка" : j.status === "done" ? "Готово" : "Загрузка…";
+
 function StatCard({ label, value, icon: Icon, accent, testid }) {
   return (
     <div data-testid={testid} className="bg-white border border-zinc-200 p-6 flex flex-col justify-between hover:border-zinc-400 transition-colors duration-150">
@@ -57,6 +73,7 @@ function StatCard({ label, value, icon: Icon, accent, testid }) {
 export default function Dashboard() {
   const navigate = useNavigate();
   const { logout } = useAuth();
+  const { jobs } = useUpload();
   const [stats, setStats] = useState(null);
   const [posts, setPosts] = useState([]);
   const [channel, setChannel] = useState(null);
@@ -81,6 +98,13 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Пока идут фоновые загрузки — обновляем таблицу, чтобы видеть смену статусов
+  useEffect(() => {
+    if (jobs.length === 0) { load(); return; }
+    const iv = setInterval(load, 2500);
+    return () => clearInterval(iv);
+  }, [jobs.length, load]);
 
   const copyLink = (url) => { navigator.clipboard.writeText(url); toast.success("Ссылка скопирована"); };
 
@@ -154,6 +178,30 @@ export default function Dashboard() {
           <StatCard label="Медиа-файлов" value={stats?.total_media ?? "—"} icon={ImageIcon} accent="#0055FF" testid="stat-media" />
         </div>
 
+        {jobs.length > 0 && (
+          <div className="mb-8 space-y-3" data-testid="upload-jobs">
+            {jobs.map((j) => (
+              <div key={j.id} className="bg-white border border-zinc-200 p-4" data-testid={`upload-job-${j.id}`}>
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-semibold text-sm truncate flex items-center gap-2">
+                    <UploadCloud className="h-4 w-4 text-[#0055FF]" /> {j.title}
+                  </span>
+                  <span className="text-xs text-zinc-500" data-testid={`upload-job-status-${j.id}`}>
+                    {j.done}/{j.total} · {jobLabel(j)}
+                  </span>
+                </div>
+                <div className="h-2 bg-zinc-100 overflow-hidden">
+                  <div
+                    className={`h-full transition-all duration-200 ${j.status === "failed" ? "bg-[#FF3333]" : "bg-[#0055FF]"}`}
+                    style={{ width: `${jobPct(j)}%` }}
+                    data-testid={`upload-job-bar-${j.id}`}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
         <div className="bg-white border border-zinc-200" data-testid="posts-table">
           <div className="px-6 py-4 border-b border-zinc-200 flex items-center justify-between">
             <span className="label-caps text-zinc-500">История постов</span>
@@ -199,25 +247,35 @@ export default function Dashboard() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-2">
-                        <a href={p.telegraph_url} target="_blank" rel="noreferrer" className="text-[#0055FF] font-mono text-xs hover:underline flex items-center gap-1" data-testid={`open-link-${p.id}`}>
-                          {p.telegraph_url.replace("https://", "").slice(0, 22)}… <ExternalLink className="h-3 w-3" />
-                        </a>
-                        <button onClick={() => copyLink(p.telegraph_url)} className="text-zinc-400 hover:text-zinc-900" data-testid={`copy-link-${p.id}`}>
-                          <Copy className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
+                      {p.telegraph_url ? (
+                        <div className="flex items-center gap-2">
+                          <a href={p.telegraph_url} target="_blank" rel="noreferrer" className="text-[#0055FF] font-mono text-xs hover:underline flex items-center gap-1" data-testid={`open-link-${p.id}`}>
+                            {p.telegraph_url.replace("https://", "").slice(0, 22)}… <ExternalLink className="h-3 w-3" />
+                          </a>
+                          <button onClick={() => copyLink(p.telegraph_url)} className="text-zinc-400 hover:text-zinc-900" data-testid={`copy-link-${p.id}`}>
+                            <Copy className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-zinc-400 font-mono" data-testid={`no-link-${p.id}`}>
+                          {p.status === "failed" ? "ошибка создания" : "создаётся…"}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell>
-                      {p.published ? (
-                        <Badge className="rounded-none bg-[#00CC66] hover:bg-[#00CC66] text-white font-bold" data-testid={`status-${p.id}`}>В КАНАЛЕ</Badge>
-                      ) : (
-                        <Badge variant="outline" className="rounded-none border-zinc-300 text-zinc-500 font-bold" data-testid={`status-${p.id}`}>ЧЕРНОВИК</Badge>
-                      )}
+                      {(() => {
+                        const st = p.published ? "published" : (p.status || "ready");
+                        const m = STATUS_META[st] || STATUS_META.ready;
+                        return (
+                          <Badge variant="outline" className={`rounded-none font-bold ${m.cls}`} data-testid={`status-${p.id}`}>
+                            {m.label}
+                          </Badge>
+                        );
+                      })()}
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1">
-                        <Button onClick={() => publish(p.id)} disabled={publishing === p.id} size="sm" className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white h-8" data-testid={`publish-${p.id}`}>
+                        <Button onClick={() => publish(p.id)} disabled={publishing === p.id || !p.telegraph_url} size="sm" className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white h-8 disabled:opacity-40" data-testid={`publish-${p.id}`}>
                           <Send className="h-3.5 w-3.5 mr-1.5" /> {p.published ? "Ещё раз" : "Опубликовать"}
                         </Button>
                         <button onClick={() => removePost(p.id)} className="p-2 text-zinc-400 hover:text-[#FF3333]" data-testid={`delete-${p.id}`}>

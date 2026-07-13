@@ -410,12 +410,15 @@ class TestCoverUrl:
         params = list(sig.parameters.keys())
         assert params[:3] == ["chat_id", "photo_url", "caption"], f"unexpected signature: {params}"
 
-        # server.publish_post should reference telegram_api.send_photo
+        # server._do_publish (called by publish_post AND _finalize_post) should reference send_photo
         server_mod = importlib.import_module("server")
-        src = inspect.getsource(server_mod.publish_post)
-        assert "send_photo" in src, "publish_post must call telegram_api.send_photo"
-        assert "send_message" in src, "publish_post must have send_message fallback"
-        assert "cover_url" in src, "publish_post must branch on cover_url"
+        src = inspect.getsource(server_mod._do_publish)
+        assert "send_photo" in src, "_do_publish must call telegram_api.send_photo"
+        assert "send_message" in src, "_do_publish must have send_message fallback"
+        assert "cover_url" in src, "_do_publish must branch on cover_url"
+        # publish_post must delegate to _do_publish
+        pub_src = inspect.getsource(server_mod.publish_post)
+        assert "_do_publish" in pub_src, "publish_post must delegate to _do_publish"
 
 
 # ---------- Channel settings (no bot token in preview → 400) ----------
