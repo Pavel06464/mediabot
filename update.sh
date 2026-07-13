@@ -16,6 +16,11 @@ cd "$APP_DIR/frontend"
 yarn install
 yarn build
 
+echo "==> Обновление конфига nginx (лимиты загрузки/таймауты)"
+sed "s|__APPDIR__|$APP_DIR|g" "$APP_DIR/deploy/nginx-mediabot.conf" > /etc/nginx/sites-available/mediabot
+ln -sf /etc/nginx/sites-available/mediabot /etc/nginx/sites-enabled/mediabot
+nginx -t
+
 echo "==> Перезапуск сервисов"
 systemctl restart mediabot
 systemctl reload nginx
