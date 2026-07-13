@@ -16,6 +16,7 @@ import {
   Settings,
   LogOut,
   Layers,
+  Droplets,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -30,6 +31,7 @@ import {
 import api from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import ChannelSettings from "@/components/ChannelSettings";
+import WatermarkSettings from "@/components/WatermarkSettings";
 
 const fmtDate = (iso) => {
   try {
@@ -60,6 +62,7 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [publishing, setPublishing] = useState(null);
   const [channelOpen, setChannelOpen] = useState(false);
+  const [watermarkOpen, setWatermarkOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -102,6 +105,7 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-[#F9FAFB]">
       <ChannelSettings open={channelOpen} onOpenChange={setChannelOpen} onChange={load} />
+      <WatermarkSettings open={watermarkOpen} onOpenChange={setWatermarkOpen} />
 
       <header className="sticky top-0 z-50 bg-white border-b border-zinc-200">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
@@ -115,6 +119,9 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <Button onClick={() => setWatermarkOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="watermark-settings-btn">
+              <Droplets className="h-4 w-4 mr-2" /> Знак
+            </Button>
             <Button onClick={() => setChannelOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="channel-settings-btn">
               <Settings className="h-4 w-4 mr-2" /> {channel ? channel.channel_title : "Канал"}
             </Button>

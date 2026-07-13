@@ -1,0 +1,34 @@
+{
+  "summary": "Watermark feature (backend + frontend) fully validated. Backend pytest: 39/39 pass (29 existing regression + 10 NEW watermark tests covering auth-gating, GET/PUT persistence, POST /preview data:image/jpeg response, upload-with-watermark applies+converts to JPEG, upload-without-watermark leaves PNG untouched, teardown reset). Extra E2E script confirmed: watermark enabled -> POST /api/upload of a plain PNG -> stored bytes are JPEG and hash differs from original -> post created via /api/posts -> Telegraph article renders <img> src pointing back to our /api/media/{id} which decodes to a valid JPEG (400x300) -> post deleted -> watermark RESET to disabled. Frontend Playwright: login (login-email/login-password/login-submit) -> dashboard -> Знак button opens watermark-dialog -> wm-preview src is data:image/jpeg;base64,... on open -> preview src changes after each of: text edit, position (top-left), color (black), size slider, opacity slider (all 5 confirmed different from previous) -> all 9 wm-pos-* buttons visible -> wm-tab-logo/wm-tab-text switch works -> wm-save closes dialog -> reopen shows persisted text '@e2e_wm_test' and Switch data-state='checked' -> final reset to disabled done. No blocking bugs.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Watermark dialog preview", "issues": ["At high size % (>=25) text watermark visually overflows the aspect-[8/5] preview container (clipped on the right). Cosmetic — server-side clamp is 3..60 %; may want to visually clamp the preview text/logo to sample image bounds or add a hint."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_watermark.py",
+    "/app/backend/tests/test_api.py",
+    "/app/test_reports/pytest/watermark_results.xml",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py POST /api/upload writes JPEG regardless of original ext when watermark is enabled but keeps the original file extension in GridFS `filename` (uses os.path.splitext(file.filename)). Non-blocking (content_type meta is correct and used for serving), but the stored filename may be 'x.png' while bytes are JPEG. Consider setting ext='.jpg' before storing.",
+    "watermark.apply_watermark swallows all exceptions and returns the ORIGINAL bytes on failure (line 66-67 except: return image_bytes). This is safe but silent: if the bundled font is missing or the config is malformed, uploads will look unwatermarked with no log. Consider logger.warning on the except.",
+    "watermark.py DEFAULT config has enabled=False but make_preview forces enabled=True — good for showing 'what it would look like'. However when the dialog opens for the first time (no config yet) the GET returns DEFAULT (enabled=False) and the preview endpoint still forces enabled=True in the preview call server-side; consistent — no bug, worth a code comment.",
+    "server.py WatermarkIn Pydantic model accepts size/opacity as unconstrained ints. Should use conint(ge=3, le=80) / conint(ge=0, le=100) to reject invalid client input; currently watermark.apply_watermark clamps internally, but the *saved* config in Mongo can be out-of-range.",
+    "server.py preview_watermark uses model_dump() then merges with DEFAULT via **cfg — the type field is a plain str, not Literal['text','logo']. Consider Literal to reject bad values.",
+    "server.py still uses deprecated @app.on_event('startup') — noted in prior iteration, still not migrated to lifespan."
+  ],
+  "updated_files": ["/app/backend/tests/test_watermark.py"],
+  "success_rate": {"backend": "100% (39/39 pytest + E2E script passed)", "frontend": "100% (login, dialog, live preview updates on all 5 controls, persistence, reset)"},
+  "test_credentials": "admin@mediabot.local / admin123 (Bearer). Read from /app/memory/test_credentials.md.",
+  "seed_data_creation": "Only transient: pytest TestWatermark uploads 2 photos (auto-orphaned in GridFS since no post created) — same pattern as previous iterations. E2E script created 'TEST_ E2E watermarked post' and deleted it (GridFS media cascades on delete). Final state: db.app_config.watermark reset to {enabled:false, type:text, text:'@mychannel', color:white, position:bottom-right, size:15, opacity:50}.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Watermark endpoints: GET/PUT /api/settings/watermark, POST /api/settings/watermark/preview (all auth-gated). Server applies watermark ONLY to photos (kind=='photo') at upload time via watermark.apply_watermark; content-type of the stored file becomes image/jpeg. Frontend live preview is debounced 350ms; wait ~700ms after each control change before comparing wm-preview.src. Login uses data-testid `login-email`, `login-password`, `login-submit` (NOT `login-email-input`). All watermark UI testids are prefixed with `wm-` (wm-enabled, wm-tab-text, wm-tab-logo, wm-text, wm-color-white, wm-color-black, wm-pos-{9 positions}, wm-size, wm-opacity, wm-preview, wm-save, wm-logo-btn, wm-logo-input). watermark.py DEFAULT is exported and used as the response when no doc exists in app_config. Storage: GridFS in preview env (no R2 vars).",
+  "rca_of_the_issue": "N/A — no bugs found."
+}

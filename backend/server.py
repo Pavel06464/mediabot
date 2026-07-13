@@ -20,6 +20,7 @@ from database import db, get_gridfs
 import storage
 import auth
 import telegram_api
+import watermark
 from telegraph_service import create_post_page
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -197,7 +198,17 @@ async def upload(file: UploadFile = File(...), user=Depends(auth.get_current_use
     content = await file.read()
     ctype = file.content_type or "application/octet-stream"
     kind = "video" if ctype.startswith("video") else "photo"
+
+    # Водяной знак — только для фото
+    if kind == "photo":
+        wm = await db.app_config.find_one({"_id": "watermark"})
+        if wm and wm.get("enabled"):
+            content = await asyncio.to_thread(watermark.apply_watermark, content, wm)
+            ctype = "image/jpeg"
+
     ext = os.path.splitext(file.filename or "")[1] or (".mp4" if kind == "video" else ".jpg")
+    if kind == "photo" and ctype == "image/jpeg":
+        ext = ".jpg"
 
     if storage.r2_enabled():
         key = f"{kind}/{uuid.uuid4()}{ext}"
@@ -262,6 +273,37 @@ async def set_channel(payload: ChannelIn, user=Depends(auth.get_current_user)):
 async def remove_channel(user=Depends(auth.get_current_user)):
     await db.app_config.delete_one({"_id": "channel"})
     return {"status": "removed"}
+
+
+# ---------- Watermark settings ----------
+class WatermarkIn(BaseModel):
+    enabled: bool = False
+    type: str = "text"
+    text: Optional[str] = ""
+    color: str = "white"
+    logo_b64: Optional[str] = ""
+    position: str = "bottom-right"
+    size: int = 15
+    opacity: int = 50
+
+
+@api_router.get("/settings/watermark")
+async def get_watermark(user=Depends(auth.get_current_user)):
+    cfg = await db.app_config.find_one({"_id": "watermark"}, {"_id": 0})
+    return cfg or watermark.DEFAULT
+
+
+@api_router.put("/settings/watermark")
+async def set_watermark(payload: WatermarkIn, user=Depends(auth.get_current_user)):
+    cfg = payload.model_dump()
+    await db.app_config.update_one({"_id": "watermark"}, {"$set": cfg}, upsert=True)
+    return cfg
+
+
+@api_router.post("/settings/watermark/preview")
+async def preview_watermark(payload: WatermarkIn, user=Depends(auth.get_current_user)):
+    img = await asyncio.to_thread(watermark.make_preview, payload.model_dump())
+    return {"image": img}
 
 
 app.include_router(api_router)
