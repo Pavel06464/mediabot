@@ -26,6 +26,7 @@
 - 2026-07-13: Редактор переработан в секции (Обложка/Описание/Фотографии/Видео) + drag-and-drop загрузка файлов из папки. Тесты iteration_3 (backend 29/29, frontend 100%). R2 на VPS проверен (токен + ключи + публичный доступ работают).
 - 2026-07-13: Водяной знак на фото (Pillow, текст/логотип, позиция/размер/прозрачность, живое превью), шрифт DejaVu встроен в repo. Тесты iteration_4.
 - 2026-07-13: Фикс большого предпросмотра в канале — publish шлёт обложку через sendPhoto (prefer_large_media не работает для telegra.ph). Пост хранит cover_url. Тесты iteration_5 (backend 44/44).
+- 2026-06 (fork): Асинхронное создание постов. POST /api/posts/draft создаёт черновик-оболочку (status uploading/processing), возвращает {id, slots}. POST /api/posts/{id}/media/{idx} грузит слоты по одному (media_done/media_total), при заполнении атомарно (findOneAndUpdate) запускается _finalize_post → создаёт Telegraph-статью (cover_url+telegraph_url, status ready) и авто-публикует если publish_after+канал. Фронтенд: UploadContext.startJob (черновик→фоновая загрузка с onUploadProgress), Dashboard рендерит панель прогресса (upload-jobs) и поллит /posts каждые 2.5с. Фикс: Dashboard падал на telegraph_url.replace(null) для черновиков — теперь показывает «создаётся…», кнопка публикации задизейблена до готовности; статусы через STATUS_META. send_photo валидирует content-type (image/*) и размер (<10 МБ). Тесты iteration_6 (backend 50/50, frontend E2E 100%).
 
 ## Deployment status (user VPS 94.183.178.153)
 - Phase 1 (файлы до 20 МБ, GridFS) развёрнут и работал. 

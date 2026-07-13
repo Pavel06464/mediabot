@@ -318,9 +318,14 @@ async def upload_media_slot(post_id: str, idx: int, file: UploadFile = File(...)
     await db.posts.update_one({"id": post_id}, {"$set": set_fields, "$inc": {"media_done": 1}})
 
     updated = await db.posts.find_one({"id": post_id})
-    if updated["media_done"] >= updated["media_total"] and updated.get("status") == "uploading":
-        await db.posts.update_one({"id": post_id}, {"$set": {"status": "processing"}})
-        await _finalize_post(post_id)
+    if updated["media_done"] >= updated["media_total"]:
+        # Атомарно захватываем финализацию, чтобы её запустил ровно один загрузчик
+        gate = await db.posts.find_one_and_update(
+            {"id": post_id, "status": "uploading"},
+            {"$set": {"status": "processing"}},
+        )
+        if gate:
+            await _finalize_post(post_id)
     out = await db.posts.find_one({"id": post_id}, {"_id": 0, "blocks": 0})
     return out
 
