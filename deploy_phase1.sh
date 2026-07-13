@@ -33,13 +33,28 @@ python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
 
 echo "==> [3/6] backend/.env"
-cat > "$APP_DIR/backend/.env" <<EOF
+if [ ! -f "$APP_DIR/backend/.env" ]; then
+    JWT="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
+    cat > "$APP_DIR/backend/.env" <<EOF
 MONGO_URL="mongodb://localhost:27017"
 DB_NAME="mediabot"
 CORS_ORIGINS="*"
 TELEGRAM_BOT_TOKEN="$BOT_TOKEN"
 PUBLIC_BASE_URL="http://$SERVER_IP"
+JWT_SECRET="$JWT"
+ADMIN_EMAIL="admin@mediabot.local"
+ADMIN_PASSWORD="admin123"
+ENABLE_BOT_POLLING="0"
+R2_ENDPOINT=""
+R2_ACCESS_KEY_ID=""
+R2_SECRET_ACCESS_KEY=""
+R2_BUCKET=""
+R2_PUBLIC_BASE=""
 EOF
+    echo "   Создан backend/.env — ЗАПОЛНИ R2_* значения для отображения фото!"
+else
+    echo "   backend/.env уже существует — оставляю как есть"
+fi
 
 echo "==> [4/6] Сборка дашборда (frontend)"
 cat > "$APP_DIR/frontend/.env" <<EOF

@@ -1,35 +1,37 @@
 # PRD — Media Post Bot (Telegraph)
 
 ## Problem Statement
-Telegram-бот, который через Telegraph создаёт посты со вложенными медиа и выдаёт ссылку для публикации в канале с предпросмотром. Понятный визуальный интерфейс (inline-кнопки + пошаговые сценарии), умеет сам публиковать в канал, помнит ссылки на каждый пост. Плюс веб-дашборд с историей.
+Инструмент для создания постов Telegraph со вложенными медиа и публикации ссылки в Telegram-канале с предпросмотром. Понятный визуальный интерфейс, память ссылок на каждый пост. Эволюционировал из Telegram-бота в веб-дашборд (dashboard-only).
 
-## User Choices
-- Медиа: пользователь шлёт фото/видео боту → вставляются в статью.
-- Публикация: оба варианта (бот сам постит / ручная ссылка).
-- История: и в боте, и веб-дашборд.
-- Интерфейс: inline-кнопки + пошаговые сценарии.
+## User Choices (актуальные)
+- Создание постов — через веб-дашборд (не через бота).
+- Вход в дашборд — логин + пароль (JWT).
+- Публикация в канал и настройка канала — из дашборда (бот-токен через httpx).
+- Обложка/предпросмотр — пользователь отмечает любое фото (идёт первой в статье).
+- Хранилище — Cloudflare R2 (https-ссылки → фото отображаются; файлы до 2 ГБ). Fallback: GridFS.
 
 ## Architecture
-- Backend: FastAPI (порт 8001). Telegram-бот (aiogram 3.29) в фоновой asyncio-задаче (long-polling), запуск в startup.
-- Медиа: скачиваются из Telegram → хранятся в MongoDB GridFS → отдаются публично через `/api/media/{id}` → встраиваются в Telegraph-статью как img/video.
-- Telegraph: библиотека `telegraph` (async), аккаунт создаётся один раз, токен в `app_config`.
-- MongoDB: `posts` (история), `settings` (канал per user, _id=user_id), `app_config` (telegraph token), GridFS для медиа.
-- Frontend: React дашборд (Swiss/high-contrast, IBM Plex Sans), таблица постов, статистика, детальная панель.
-- Bot: @pdmtelegraphbot, токен в backend/.env.
+- Backend: FastAPI (порт 8001). JWT-auth (auth.py, bcrypt+PyJWT, seed admin из .env). 
+- Хранилище: storage.py — R2 (boto3) если заданы R2_*, иначе MongoDB GridFS (`/api/media/{id}`, public).
+- Telegraph: telegraph_service.py (async, аккаунт-токен в app_config), build_html использует прямые url блоков; обложка ставится первой.
+- Telegram: telegram_api.py (httpx) — getChat (настройка канала) + sendMessage (публикация с предпросмотром). Bot polling (aiogram) отключён (ENABLE_BOT_POLLING=0), код сохранён.
+- MongoDB: users, posts, app_config (channel + telegraph token), GridFS.
+- Frontend: React + react-router. AuthContext (Bearer token в localStorage), Login, Dashboard (stats, таблица, публикация, удаление, настройка канала), PostEditor (блоки текст/фото/видео, порядок, обложка, загрузка).
+- Deploy (HostVDS VPS): deploy_phase1.sh (полная установка), update.sh (обновление после git pull), deploy/ (systemd + nginx), setup_hostvds.sh (системные зависимости + swap).
 
-## Implemented (2026-07-05)
-- Бот: /start, главное меню (Создать пост / Мои посты / Настройки канала / Помощь).
-- Пошаговое создание поста: заголовок → приём текста/фото/видео → «Готово» → Telegraph-ссылка с предпросмотром.
-- Публикация в канал кнопкой (бот-админ) или ручное копирование ссылки.
-- Настройка канала: @username / ID / пересланное сообщение, проверка через get_chat.
-- «Мои посты» — список последних постов со ссылками и статусом.
-- Веб-дашборд: статистика, таблица истории, детальная панель (Sheet), копирование ссылок, удаление, автообновление 15с.
-- API: /api/stats, /api/posts, /api/posts/{id}, /api/media/{id}, /api/channels, DELETE /api/posts/{id}.
-- Тестирование: backend 11/11 pytest, frontend 100% (iteration_1).
+## Implemented
+- 2026-07-05: MVP Telegram-бот (aiogram) + Telegraph + GridFS + дашборд (открытый). Тесты iteration_1 (11/11 + frontend).
+- 2026-07-05..13: Перенос на VPS HostVDS (скрипты, инструкция DEPLOYMENT_HOSTVDS.md). Поддержка Local Bot API Server + R2 в коде. Удалены внутренние пакеты (emergentintegrations, litellm) из requirements.
+- 2026-07-13: Dashboard-only переработка — JWT-авторизация, редактор постов в дашборде (текст/фото/видео/порядок/обложка), загрузка медиа (R2/GridFS), публикация в канал + настройка канала из дашборда. Тесты iteration_2 (backend 28/28, frontend 100%).
+
+## Deployment status (user VPS 94.183.178.153)
+- Phase 1 (файлы до 20 МБ, GridFS) развёрнут и работал. 
+- Требуется: новый токен BotFather (старый отозван), R2 Secret Access Key, обновление .env + update.sh для новой dashboard-only версии.
 
 ## Backlog / Next
-- P1: Редактирование существующей статьи (edit_post_page уже есть в сервисе, не подключён к боту UI).
-- P1: Форматирование текста (жирный/курсив/заголовки/ссылки) через разметку в боте.
-- P2: Планировщик отложенной публикации в канал.
-- P2: Несколько каналов на выбор при публикации.
-- P2: Аутентификация дашборда, если понадобится приватность.
+- P1: Развернуть новую версию на VPS с R2 (ждём Secret Access Key + новый токен).
+- P1: R2 delete-хелпер — при удалении поста чистить объекты в R2 (сейчас чистится только GridFS). Хранить R2 key в посте.
+- P2: Файлы до 2 ГБ — Local Bot API Server (docker-compose с общим томом) ИЛИ прямая загрузка больших файлов в дашборде + nginx client_max_body_size.
+- P2: Редактирование существующих постов (edit_page уже есть в сервисе).
+- P2: Форматирование текста (жирный/курсив/ссылки/заголовки) в редакторе.
+- P2: Лог ошибок публикации, миграция on_event → lifespan, домен + HTTPS (certbot).
