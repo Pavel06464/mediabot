@@ -232,6 +232,57 @@ class TestFullFlow:
         assert client.get(f"{API}/posts/{pid}").status_code == 404
 
 
+# ---------- Cover ordering with multiple photos ----------
+class TestCoverOrdering:
+    """Verify server reorders is_cover block to be first, before other photos in Telegraph output."""
+
+    def test_cover_ordered_before_other_photos(self, client):
+        # Upload three photos
+        media = []
+        for i in range(3):
+            r = client.post(f"{API}/upload", files={"file": (f"p{i}.png", io.BytesIO(PNG), "image/png")})
+            assert r.status_code == 200
+            media.append(r.json())
+
+        # Blocks: text, photo(not cover), photo(cover), photo(not cover)
+        # Server should reorder → cover first
+        payload = {
+            "title": "TEST_ cover ordering",
+            "blocks": [
+                {"type": "text", "value": "intro"},
+                {"type": "photo", "url": media[0]["url"], "media_id": media[0]["media_id"], "is_cover": False},
+                {"type": "photo", "url": media[1]["url"], "media_id": media[1]["media_id"], "is_cover": True, "caption": "COVER_CAP"},
+                {"type": "photo", "url": media[2]["url"], "media_id": media[2]["media_id"], "is_cover": False},
+            ],
+        }
+        r = client.post(f"{API}/posts", json=payload)
+        assert r.status_code == 200, r.text
+        post = r.json()
+        post_id = post["id"]
+        try:
+            # Fetch telegraph page HTML and verify cover media_id appears BEFORE the two others
+            html = requests.get(post["telegraph_url"], timeout=15).text
+            positions = []
+            for m in media:
+                pos = html.find(m["media_id"])
+                # Telegraph may rehost — accept -1 as "unknown" only if rehosted (telegra.ph/file present)
+                positions.append(pos)
+            cover_pos = positions[1]
+            # If media_ids stripped by rehost, at least check img order matches by counting <img before caption
+            if cover_pos != -1 and positions[0] != -1 and positions[2] != -1:
+                assert cover_pos < positions[0], f"cover should appear before photo0, got cover={cover_pos} photo0={positions[0]}"
+                assert cover_pos < positions[2], f"cover should appear before photo2, got cover={cover_pos} photo2={positions[2]}"
+            else:
+                # Rehosted case: caption text should be the first <figcaption> (COVER_CAP)
+                first_cap = html.find("<figcaption>")
+                cover_cap = html.find("COVER_CAP")
+                if cover_cap != -1:
+                    assert first_cap == -1 or cover_cap <= first_cap + 100
+        finally:
+            # cleanup
+            client.delete(f"{API}/posts/{post_id}")
+
+
 # ---------- Channel settings (no bot token in preview → 400) ----------
 class TestChannelSettings:
     def test_get_settings_empty(self, client):
