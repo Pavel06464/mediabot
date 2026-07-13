@@ -378,15 +378,22 @@ async def upload_media_slot(post_id: str, idx: int, file: UploadFile = File(...)
 
     slot_kind = blocks[idx]["type"]
     ctype = file.content_type or "application/octet-stream"
+    name = (file.filename or "").lower()
     file_kind = "video" if ctype.startswith("video") else ("photo" if ctype.startswith("image") else None)
+    if file_kind is None:
+        if name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif", ".bmp", ".tiff")):
+            file_kind = "photo"
+        elif name.endswith((".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg")):
+            file_kind = "video"
     if file_kind != slot_kind:
         expected = "видео" if slot_kind == "video" else "изображение"
-        raise HTTPException(status_code=400, detail=f"Ожидается {expected}, а получен файл типа «{ctype}»")
+        raise HTTPException(status_code=400, detail=f"Ожидается {expected}, а получен файл «{file.filename or ctype}»")
 
     if slot_kind == "photo":
         content = await file.read()
         if len(content) > 25 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="Изображение больше 25 МБ")
+        content, ctype = await asyncio.to_thread(watermark.ensure_web_format, content, ctype, file.filename or "")
         wm = await db.app_config.find_one({"_id": "watermark"})
         if wm and wm.get("enabled"):
             content = await asyncio.to_thread(watermark.apply_watermark, content, wm)

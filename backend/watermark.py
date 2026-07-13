@@ -3,7 +3,35 @@ import os
 import base64
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    _HEIF_OK = True
+except Exception:
+    _HEIF_OK = False
+
 FONT_PATH = os.path.join(os.path.dirname(__file__), "assets", "DejaVuSans-Bold.ttf")
+
+_WEB_FORMATS = {"JPEG", "PNG", "WEBP", "GIF"}
+
+
+def ensure_web_format(image_bytes: bytes, ctype: str, filename: str):
+    """Конвертирует не-веб форматы (HEIC/HEIF с айфона и т.п.) в JPEG, чтобы фото
+    отображалось в Telegraph и браузере. Возвращает (bytes, content_type)."""
+    name = (filename or "").lower()
+    looks_heic = "heic" in (ctype or "") or "heif" in (ctype or "") or name.endswith((".heic", ".heif"))
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        fmt = (img.format or "").upper()
+        if fmt in _WEB_FORMATS and not looks_heic:
+            return image_bytes, ctype
+        out = img.convert("RGB")
+        buf = io.BytesIO()
+        out.save(buf, format="JPEG", quality=90)
+        return buf.getvalue(), "image/jpeg"
+    except Exception:
+        return image_bytes, ctype
+
 
 DEFAULT = {
     "enabled": False,

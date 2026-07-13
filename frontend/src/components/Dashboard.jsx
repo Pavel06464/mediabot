@@ -61,6 +61,7 @@ const jobLabel = (j) =>
   j.status === "failed" ? "Ошибка"
     : j.status === "done" ? "Готово"
     : j.status === "processing" ? "Оформляю статью…"
+    : j.attempt > 1 ? `Загрузка… (попытка ${j.attempt})`
     : "Загрузка…";
 
 function StatCard({ label, value, icon: Icon, accent, testid }) {
@@ -78,7 +79,7 @@ function StatCard({ label, value, icon: Icon, accent, testid }) {
 export default function Dashboard() {
   const navigate = useNavigate();
   const { logout } = useAuth();
-  const { jobs } = useUpload();
+  const { jobs, retryJob, dismissJob } = useUpload();
   const [stats, setStats] = useState(null);
   const [posts, setPosts] = useState([]);
   const [channel, setChannel] = useState(null);
@@ -187,13 +188,25 @@ export default function Dashboard() {
           <div className="mb-8 space-y-3" data-testid="upload-jobs">
             {jobs.map((j) => (
               <div key={j.id} className="bg-white border border-zinc-200 p-4" data-testid={`upload-job-${j.id}`}>
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center justify-between mb-2 gap-3">
                   <span className="font-semibold text-sm truncate flex items-center gap-2">
                     <UploadCloud className="h-4 w-4 text-[#0055FF]" /> {j.title}
                   </span>
-                  <span className="text-xs text-zinc-500" data-testid={`upload-job-status-${j.id}`}>
-                    {j.done}/{j.total} · {jobLabel(j)}
-                  </span>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="text-xs text-zinc-500" data-testid={`upload-job-status-${j.id}`}>
+                      {j.done}/{j.total} · {jobLabel(j)}
+                    </span>
+                    {j.status === "failed" && (
+                      <>
+                        <Button onClick={() => retryJob(j.id)} size="sm" className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white h-7 text-xs" data-testid={`upload-retry-${j.id}`}>
+                          <RefreshCw className="h-3 w-3 mr-1" /> Повторить
+                        </Button>
+                        <button onClick={() => dismissJob(j.id)} className="text-zinc-400 hover:text-[#FF3333]" data-testid={`upload-dismiss-${j.id}`}>
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
                 <div className="h-2 bg-zinc-100 overflow-hidden">
                   <div
@@ -202,6 +215,9 @@ export default function Dashboard() {
                     data-testid={`upload-job-bar-${j.id}`}
                   />
                 </div>
+                {j.status === "failed" && j.error && (
+                  <p className="text-xs text-[#FF3333] mt-2" data-testid={`upload-job-error-${j.id}`}>Файл {(j.nextIdx ?? 0) + 1}: {j.error}</p>
+                )}
               </div>
             ))}
           </div>
