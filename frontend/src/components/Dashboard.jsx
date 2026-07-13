@@ -240,9 +240,13 @@ export default function Dashboard() {
                 {posts.map((p) => (
                   <TableRow key={p.id} className="border-zinc-100 hover:bg-zinc-50 transition-colors duration-150" data-testid={`post-row-${p.id}`}>
                     <TableCell>
-                      <div className="h-10 w-10 bg-zinc-900 flex items-center justify-center">
-                        {p.media_count > 0 ? <Film className="h-4 w-4 text-white" /> : <FileText className="h-4 w-4 text-white" />}
-                      </div>
+                      {p.cover_url ? (
+                        <img src={p.cover_url} alt="" className="h-10 w-10 object-cover border border-zinc-200 bg-zinc-50" data-testid={`thumb-${p.id}`} />
+                      ) : (
+                        <div className="h-10 w-10 bg-zinc-900 flex items-center justify-center" data-testid={`thumb-${p.id}`}>
+                          {p.media_count > 0 ? <Film className="h-4 w-4 text-white" /> : <FileText className="h-4 w-4 text-white" />}
+                        </div>
+                      )}
                     </TableCell>
                     <TableCell className="font-semibold max-w-[240px] truncate">{p.title}</TableCell>
                     <TableCell className="text-sm text-zinc-500 whitespace-nowrap">{fmtDate(p.created_at)}</TableCell>
