@@ -175,7 +175,8 @@ async def publish_post(post_id: str, user=Depends(auth.get_current_user)):
             # Отправляем обложку картинкой -> гарантированно большой предпросмотр
             try:
                 await telegram_api.send_photo(channel["channel_id"], post["cover_url"], caption)
-            except Exception:
+            except Exception as e:
+                logger.warning("sendPhoto failed, fallback to sendMessage: %s", e)
                 await telegram_api.send_message(channel["channel_id"], caption)
         else:
             await telegram_api.send_message(channel["channel_id"], caption)

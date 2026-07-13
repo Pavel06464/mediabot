@@ -40,6 +40,11 @@ async def send_photo(chat_id, photo_url: str, caption: str):
     async with httpx.AsyncClient(timeout=60, follow_redirects=True) as c:
         img = await c.get(photo_url, headers={"User-Agent": _UA})
         img.raise_for_status()
+        ctype = img.headers.get("content-type", "")
+        if not ctype.startswith("image/"):
+            raise ValueError(f"Обложка не изображение (content-type: {ctype or 'unknown'})")
+        if len(img.content) > 10 * 1024 * 1024:
+            raise ValueError("Обложка больше 10 МБ — Telegram не примет её как фото")
         files = {"photo": ("cover.jpg", img.content, "image/jpeg")}
         form = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"}
         r = await c.post(f"{_api()}/sendPhoto", data=form, files=files)
