@@ -27,15 +27,14 @@
 - 2026-07-13: Водяной знак на фото (Pillow, текст/логотип, позиция/размер/прозрачность, живое превью), шрифт DejaVu встроен в repo. Тесты iteration_4.
 - 2026-07-13: Фикс большого предпросмотра в канале — publish шлёт обложку через sendPhoto (prefer_large_media не работает для telegra.ph). Пост хранит cover_url. Тесты iteration_5 (backend 44/44).
 - 2026-06 (fork): Асинхронное создание постов. POST /api/posts/draft создаёт черновик-оболочку (status uploading/processing), возвращает {id, slots}. POST /api/posts/{id}/media/{idx} грузит слоты по одному (media_done/media_total), при заполнении атомарно (findOneAndUpdate) запускается _finalize_post → создаёт Telegraph-статью (cover_url+telegraph_url, status ready) и авто-публикует если publish_after+канал. Фронтенд: UploadContext.startJob (черновик→фоновая загрузка с onUploadProgress), Dashboard рендерит панель прогресса (upload-jobs) и поллит /posts каждые 2.5с. Фикс: Dashboard падал на telegraph_url.replace(null) для черновиков — теперь показывает «создаётся…», кнопка публикации задизейблена до готовности; статусы через STATUS_META. send_photo валидирует content-type (image/*) и размер (<10 МБ). Тесты iteration_6 (backend 50/50, frontend E2E 100%).
+- 2026-06 (fork): Пакет доработок. (1) Фаза «Оформляю статью…» в панели прогресса — UploadContext ставит job.status=processing и поллит /posts/{id} до ready/failed. (2) Очистка объектов R2 при удалении поста — блоки хранят r2_key, пост хранит r2_keys[], delete_post вызывает storage.delete_file. (3) Файлы до 2 ГБ — видео стримятся в temp-файл (_stream_to_temp, чанки по 1 МБ) и грузятся в R2 (multipart boto3) без загрузки в RAM; nginx client_max_body_size=2100M + proxy_request_buffering off. (4) Редактирование постов — GET /posts/{id}/edit + PUT /posts/{id} (edit_page на месте, тот же URL), фронтенд EditPost.jsx на /edit/:id (заголовок/описание/подписи/выбор обложки), кнопка edit-{id} в Dashboard. (5) Валидация слотов — несовпадение типа файла и слота → 400, фото >25 МБ → 400 (вместо 500). (6) Форматирование текста — md_to_html (# H3, ## H4, > цитата, **жирный**, *курсив*, [текст](url)), MarkdownToolbar над описанием в редакторе и при правке. Тесты iteration_7 (backend 69/69, frontend E2E 100%).
 
 ## Deployment status (user VPS 94.183.178.153)
 - Phase 1 (файлы до 20 МБ, GridFS) развёрнут и работал. 
 - Требуется: новый токен BotFather (старый отозван), R2 Secret Access Key, обновление .env + update.sh для новой dashboard-only версии.
 
 ## Backlog / Next
-- P1: Развернуть новую версию на VPS с R2 (ждём Secret Access Key + новый токен).
-- P1: R2 delete-хелпер — при удалении поста чистить объекты в R2 (сейчас чистится только GridFS). Хранить R2 key в посте.
-- P2: Файлы до 2 ГБ — Local Bot API Server (docker-compose с общим томом) ИЛИ прямая загрузка больших файлов в дашборде + nginx client_max_body_size.
-- P2: Редактирование существующих постов (edit_page уже есть в сервисе).
-- P2: Форматирование текста (жирный/курсив/ссылки/заголовки) в редакторе.
+- P1: Развернуть новую версию на VPS с R2 (ждём Secret Access Key + новый токен BotFather) — проверить реальную авто-публикацию с большим предпросмотром.
+- P2: Стриминг фото в temp тоже (сейчас фото читается в RAM до проверки 25 МБ); проверка Content-Length до чтения.
+- P2: Удаление/добавление медиа при редактировании поста (сейчас правятся только подписи/обложка/текст/заголовок).
 - P2: Лог ошибок публикации, миграция on_event → lifespan, домен + HTTPS (certbot).
