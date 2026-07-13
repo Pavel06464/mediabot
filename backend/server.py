@@ -136,6 +136,10 @@ async def create_post(payload: PostIn, user=Depends(auth.get_current_user)):
 
     media_ids = [b["media_id"] for b in blocks if b.get("media_id")]
     preview = next((b.get("value") for b in blocks if b.get("type") == "text" and b.get("value")), "")
+    cover_block = next((b for b in blocks if b.get("is_cover") and b["type"] == "photo" and b.get("url")), None)
+    if not cover_block:
+        cover_block = next((b for b in blocks if b["type"] == "photo" and b.get("url")), None)
+    cover_url = cover_block["url"] if cover_block else None
     post_id = str(uuid.uuid4())
     doc = {
         "id": post_id,
@@ -143,6 +147,7 @@ async def create_post(payload: PostIn, user=Depends(auth.get_current_user)):
         "title": payload.title.strip(),
         "telegraph_url": url,
         "telegraph_path": path,
+        "cover_url": cover_url,
         "media_count": sum(1 for b in blocks if b["type"] in ("photo", "video")),
         "media_ids": media_ids,
         "block_count": len(blocks),
@@ -164,10 +169,16 @@ async def publish_post(post_id: str, user=Depends(auth.get_current_user)):
     channel = await db.app_config.find_one({"_id": "channel"})
     if not channel:
         raise HTTPException(status_code=400, detail="Сначала настройте канал в настройках")
+    caption = f"<b>{post['title']}</b>\n\n{post['telegraph_url']}"
     try:
-        await telegram_api.send_message(
-            channel["channel_id"], f"<b>{post['title']}</b>\n\n{post['telegraph_url']}"
-        )
+        if post.get("cover_url"):
+            # Отправляем обложку картинкой -> гарантированно большой предпросмотр
+            try:
+                await telegram_api.send_photo(channel["channel_id"], post["cover_url"], caption)
+            except Exception:
+                await telegram_api.send_message(channel["channel_id"], caption)
+        else:
+            await telegram_api.send_message(channel["channel_id"], caption)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка публикации: {e}")
     await db.posts.update_one(

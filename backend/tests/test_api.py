@@ -283,6 +283,141 @@ class TestCoverOrdering:
             client.delete(f"{API}/posts/{post_id}")
 
 
+# ---------- Cover URL storage (bug fix: large preview via sendPhoto) ----------
+class TestCoverUrl:
+    """Verify cover_url is correctly computed & stored on post creation.
+
+    Bug context: publish previously produced only a small thumbnail because
+    prefer_large_media doesn't apply to telegra.ph links. Fix stores a cover_url
+    on the post and publish uses telegram_api.send_photo (uploads real image).
+    We can't exercise real Telegram in preview (no bot token / channel), so we
+    verify (1) cover_url stored correctly for 3 cases and (2) publish returns
+    graceful 400 (no channel) and (3) code path uses send_photo.
+    """
+
+    def _upload(self, client):
+        r = client.post(f"{API}/upload", files={"file": ("c.png", io.BytesIO(PNG), "image/png")})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def test_cover_url_explicit_is_cover(self, client):
+        m1 = self._upload(client)
+        m2 = self._upload(client)
+        payload = {
+            "title": "TEST_ cover explicit",
+            "blocks": [
+                {"type": "text", "value": "hello"},
+                {"type": "photo", "url": m1["url"], "media_id": m1["media_id"], "is_cover": False},
+                {"type": "photo", "url": m2["url"], "media_id": m2["media_id"], "is_cover": True},
+            ],
+        }
+        r = client.post(f"{API}/posts", json=payload)
+        assert r.status_code == 200, r.text
+        post = r.json()
+        pid = post["id"]
+        try:
+            # cover_url present, non-null, equals the is_cover photo url (m2)
+            assert post.get("cover_url") == m2["url"], f"expected cover_url == m2 url, got {post.get('cover_url')}"
+            # persisted — GET returns same
+            g = client.get(f"{API}/posts/{pid}")
+            assert g.status_code == 200
+            assert g.json().get("cover_url") == m2["url"]
+        finally:
+            client.delete(f"{API}/posts/{pid}")
+
+    def test_cover_url_null_when_no_photos(self, client):
+        payload = {
+            "title": "TEST_ no photos",
+            "blocks": [
+                {"type": "text", "value": "only text here"},
+            ],
+        }
+        r = client.post(f"{API}/posts", json=payload)
+        assert r.status_code == 200, r.text
+        post = r.json()
+        pid = post["id"]
+        try:
+            assert "cover_url" in post, "cover_url key must exist even if null"
+            assert post["cover_url"] is None, f"cover_url should be null, got {post['cover_url']}"
+            g = client.get(f"{API}/posts/{pid}")
+            assert g.json().get("cover_url") is None
+        finally:
+            client.delete(f"{API}/posts/{pid}")
+
+    def test_cover_url_falls_back_to_first_photo(self, client):
+        m1 = self._upload(client)
+        m2 = self._upload(client)
+        payload = {
+            "title": "TEST_ fallback cover",
+            "blocks": [
+                {"type": "text", "value": "no cover flag"},
+                {"type": "photo", "url": m1["url"], "media_id": m1["media_id"], "is_cover": False},
+                {"type": "photo", "url": m2["url"], "media_id": m2["media_id"], "is_cover": False},
+            ],
+        }
+        r = client.post(f"{API}/posts", json=payload)
+        assert r.status_code == 200, r.text
+        post = r.json()
+        pid = post["id"]
+        try:
+            # first photo (m1) wins as fallback
+            assert post.get("cover_url") == m1["url"], (
+                f"expected cover_url to fall back to first photo m1, got {post.get('cover_url')}"
+            )
+            g = client.get(f"{API}/posts/{pid}")
+            assert g.json().get("cover_url") == m1["url"]
+        finally:
+            client.delete(f"{API}/posts/{pid}")
+
+    def test_publish_without_channel_graceful_400(self, client):
+        """Ensure preview env (no channel) returns HTTP 400 with clear message, not 500."""
+        # Create a post with cover to hit the send_photo code path (even though it won't run)
+        m = self._upload(client)
+        payload = {
+            "title": "TEST_ publish no channel",
+            "blocks": [
+                {"type": "photo", "url": m["url"], "media_id": m["media_id"], "is_cover": True},
+            ],
+        }
+        r = client.post(f"{API}/posts", json=payload)
+        assert r.status_code == 200
+        pid = r.json()["id"]
+        try:
+            # ensure no channel configured
+            client.delete(f"{API}/settings/channel")
+            pub = client.post(f"{API}/posts/{pid}/publish")
+            assert pub.status_code == 400, f"expected 400, got {pub.status_code}: {pub.text}"
+            detail = (pub.json().get("detail") or "").lower()
+            assert ("канал" in detail) or ("channel" in detail), f"expected channel-related detail, got: {detail}"
+            # Not published
+            g = client.get(f"{API}/posts/{pid}")
+            assert g.json().get("published") is False
+        finally:
+            client.delete(f"{API}/posts/{pid}")
+
+    def test_telegram_api_has_send_photo_and_is_used(self):
+        """Code-level check: telegram_api.send_photo exists and publish_post uses it when cover_url present."""
+        import importlib
+        import inspect
+        # Add backend to path
+        import sys
+        sys.path.insert(0, "/app/backend")
+        telegram_api_mod = importlib.import_module("telegram_api")
+        assert hasattr(telegram_api_mod, "send_photo"), "telegram_api.send_photo must exist"
+        assert callable(telegram_api_mod.send_photo)
+        # Signature should accept (chat_id, photo_url, caption)
+        sig = inspect.signature(telegram_api_mod.send_photo)
+        params = list(sig.parameters.keys())
+        assert params[:3] == ["chat_id", "photo_url", "caption"], f"unexpected signature: {params}"
+
+        # server.publish_post should reference telegram_api.send_photo
+        server_mod = importlib.import_module("server")
+        src = inspect.getsource(server_mod.publish_post)
+        assert "send_photo" in src, "publish_post must call telegram_api.send_photo"
+        assert "send_message" in src, "publish_post must have send_message fallback"
+        assert "cover_url" in src, "publish_post must branch on cover_url"
+
+
 # ---------- Channel settings (no bot token in preview → 400) ----------
 class TestChannelSettings:
     def test_get_settings_empty(self, client):
