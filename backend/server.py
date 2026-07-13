@@ -189,8 +189,32 @@ async def create_post(payload: PostIn, user=Depends(auth.get_current_user)):
     return doc
 
 
+def _split_media(blocks):
+    """Разбивает блоки на текст / фото / видео и определяет обложку (первое is_cover фото)."""
+    text_blocks = [b for b in blocks if b.get("type") == "text" and (b.get("value") or "").strip()]
+    photos = [b for b in blocks if b.get("type") == "photo" and b.get("url")]
+    videos = [b for b in blocks if b.get("type") == "video" and b.get("url")]
+    cover = next((b for b in photos if b.get("is_cover")), None) or (photos[0] if photos else None)
+    if cover and photos:
+        photos = [cover] + [b for b in photos if b is not cover]
+    return text_blocks, photos, videos, cover
+
+
+def _publish_caption(post: dict) -> str:
+    photos_url = post.get("photos_url")
+    videos_url = post.get("videos_url")
+    parts = [f"<b>{post['title']}</b>", ""]
+    if photos_url:
+        parts.append(f"📷 Фото: {photos_url}")
+    if videos_url:
+        parts.append(f"🎬 Видео: {videos_url}")
+    if not photos_url and not videos_url:
+        parts.append(post.get("telegraph_url") or "")
+    return "\n".join(parts)
+
+
 async def _do_publish(post: dict, channel: dict):
-    caption = f"<b>{post['title']}</b>\n\n{post['telegraph_url']}"
+    caption = _publish_caption(post)
     if post.get("cover_url"):
         try:
             await telegram_api.send_photo(channel["channel_id"], post["cover_url"], caption)
@@ -253,25 +277,31 @@ async def _finalize_post(post_id: str):
     if not post or post.get("status") not in ("uploading", "processing"):
         return
     blocks = post.get("blocks", [])
-    cover_idx = next((i for i, b in enumerate(blocks) if b.get("is_cover") and b["type"] == "photo" and b.get("url")), None)
-    if cover_idx is not None:
-        ordered = [blocks[cover_idx]] + [b for i, b in enumerate(blocks) if i != cover_idx]
-    else:
-        ordered = blocks
+    text_blocks, photos, videos, cover = _split_media(blocks)
+    photos_url = photos_path = videos_url = videos_path = None
     try:
-        url, path = await create_post_page(post["title"], ordered, BASE_URL)
+        # Статья с фото (или текстовая, если медиа нет вовсе). Текст идёт в фото-статью.
+        if photos or not videos:
+            photos_url, photos_path = await create_post_page(post["title"], text_blocks + photos, BASE_URL)
+        # Отдельная статья с видео. Текст сюда — только если фото нет.
+        if videos:
+            vcontent = videos if photos else (text_blocks + videos)
+            videos_url, videos_path = await create_post_page(post["title"], vcontent, BASE_URL)
     except Exception as e:
         logger.exception("finalize telegraph failed")
         await db.posts.update_one({"id": post_id}, {"$set": {"status": "failed", "error": str(e)}})
         return
-    cover_block = next((b for b in blocks if b.get("is_cover") and b["type"] == "photo" and b.get("url")), None)
-    if not cover_block:
-        cover_block = next((b for b in blocks if b["type"] == "photo" and b.get("url")), None)
+    primary_url = photos_url or videos_url
+    primary_path = photos_path or videos_path
     media_ids = [b["media_id"] for b in blocks if b.get("media_id")]
     upd = {
-        "telegraph_url": url,
-        "telegraph_path": path,
-        "cover_url": cover_block["url"] if cover_block else None,
+        "telegraph_url": primary_url,
+        "telegraph_path": primary_path,
+        "photos_url": photos_url,
+        "photos_path": photos_path,
+        "videos_url": videos_url,
+        "videos_path": videos_path,
+        "cover_url": cover["url"] if cover else None,
         "media_ids": media_ids,
         "status": "ready",
     }
@@ -482,29 +512,41 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
     elif desc:
         blocks.insert(0, {"type": "text", "value": desc})
 
-    cover_idx = next((i for i, b in enumerate(blocks) if b.get("is_cover") and b["type"] == "photo" and b.get("url")), None)
-    ordered = [blocks[cover_idx]] + [b for i, b in enumerate(blocks) if i != cover_idx] if cover_idx is not None else blocks
+    text_blocks, photos, videos, cover = _split_media(blocks)
+    photos_url, photos_path = post.get("photos_url"), post.get("photos_path")
+    videos_url, videos_path = post.get("videos_url"), post.get("videos_path")
+    title = payload.title.strip()
     try:
-        url, path = await edit_post_page(post["telegraph_path"], payload.title.strip(), ordered, BASE_URL)
+        if photos_path or videos_path:
+            if photos_path:
+                photos_url, photos_path = await edit_post_page(photos_path, title, text_blocks + photos, BASE_URL)
+            if videos_path:
+                vcontent = videos if photos else (text_blocks + videos)
+                videos_url, videos_path = await edit_post_page(videos_path, title, vcontent, BASE_URL)
+        else:
+            # Легаси-пост с единственной статьёй
+            ordered = ([cover] + [b for b in blocks if b is not cover]) if cover else blocks
+            photos_url, photos_path = await edit_post_page(post["telegraph_path"], title, ordered, BASE_URL)
     except Exception as e:
         logger.exception("edit telegraph failed")
         raise HTTPException(status_code=500, detail=f"Ошибка Telegraph: {e}")
 
-    cover_block = next((b for b in blocks if b.get("is_cover") and b["type"] == "photo" and b.get("url")), None)
-    if not cover_block:
-        cover_block = next((b for b in blocks if b["type"] == "photo" and b.get("url")), None)
     await db.posts.update_one(
         {"id": post_id},
         {"$set": {
-            "title": payload.title.strip(),
+            "title": title,
             "blocks": blocks,
-            "telegraph_url": url,
-            "telegraph_path": path,
-            "cover_url": cover_block["url"] if cover_block else None,
+            "telegraph_url": photos_url or videos_url,
+            "telegraph_path": photos_path or videos_path,
+            "photos_url": photos_url,
+            "photos_path": photos_path,
+            "videos_url": videos_url,
+            "videos_path": videos_path,
+            "cover_url": cover["url"] if cover else None,
             "preview": desc[:200],
         }},
     )
-    return {"status": "updated", "telegraph_url": url}
+    return {"status": "updated", "telegraph_url": photos_url or videos_url}
 
 
 # ---------- Upload ----------
