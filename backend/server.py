@@ -21,7 +21,7 @@ import storage
 import auth
 import telegram_api
 import watermark
-from telegraph_service import create_post_page, edit_post_page
+from telegraph_service import create_paginated_page, edit_paginated_page
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -155,7 +155,8 @@ async def create_post(payload: PostIn, user=Depends(auth.get_current_user)):
         ordered = blocks
 
     try:
-        url, path = await create_post_page(payload.title, ordered, BASE_URL)
+        url, paths = await create_paginated_page(payload.title, ordered, BASE_URL)
+        path = paths[0]
     except Exception as e:
         logger.exception("Telegraph create failed")
         raise HTTPException(status_code=500, detail=f"Ошибка Telegraph: {e}")
@@ -279,18 +280,21 @@ async def _finalize_post(post_id: str):
     blocks = post.get("blocks", [])
     text_blocks, photos, videos, cover = _split_media(blocks)
     photos_url = photos_path = videos_url = videos_path = None
+    photos_paths = videos_paths = []
     try:
         # Статья с фото (или текстовая, если медиа нет вовсе). Текст идёт в фото-статью.
         if photos or not videos:
-            photos_url, photos_path = await create_post_page(post["title"], text_blocks + photos, BASE_URL)
+            photos_url, photos_paths = await create_paginated_page(post["title"], text_blocks + photos, BASE_URL)
         # Отдельная статья с видео. Текст сюда — только если фото нет.
         if videos:
             vcontent = videos if photos else (text_blocks + videos)
-            videos_url, videos_path = await create_post_page(post["title"], vcontent, BASE_URL)
+            videos_url, videos_paths = await create_paginated_page(post["title"], vcontent, BASE_URL)
     except Exception as e:
         logger.exception("finalize telegraph failed")
         await db.posts.update_one({"id": post_id}, {"$set": {"status": "failed", "error": str(e)}})
         return
+    photos_path = photos_paths[0] if photos_paths else None
+    videos_path = videos_paths[0] if videos_paths else None
     primary_url = photos_url or videos_url
     primary_path = photos_path or videos_path
     media_ids = [b["media_id"] for b in blocks if b.get("media_id")]
@@ -299,8 +303,10 @@ async def _finalize_post(post_id: str):
         "telegraph_path": primary_path,
         "photos_url": photos_url,
         "photos_path": photos_path,
+        "photos_paths": photos_paths,
         "videos_url": videos_url,
         "videos_path": videos_path,
+        "videos_paths": videos_paths,
         "cover_url": cover["url"] if cover else None,
         "media_ids": media_ids,
         "status": "ready",
@@ -520,20 +526,20 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
         blocks.insert(0, {"type": "text", "value": desc})
 
     text_blocks, photos, videos, cover = _split_media(blocks)
-    photos_url, photos_path = post.get("photos_url"), post.get("photos_path")
-    videos_url, videos_path = post.get("videos_url"), post.get("videos_path")
+    photos_url, photos_paths = post.get("photos_url"), post.get("photos_paths") or ([post["photos_path"]] if post.get("photos_path") else [])
+    videos_url, videos_paths = post.get("videos_url"), post.get("videos_paths") or ([post["videos_path"]] if post.get("videos_path") else [])
     title = payload.title.strip()
     try:
-        if photos_path or videos_path:
-            if photos_path:
-                photos_url, photos_path = await edit_post_page(photos_path, title, text_blocks + photos, BASE_URL)
-            if videos_path:
+        if photos_paths or videos_paths:
+            if photos_paths:
+                photos_url, photos_paths = await edit_paginated_page(photos_paths, title, text_blocks + photos, BASE_URL)
+            if videos_paths:
                 vcontent = videos if photos else (text_blocks + videos)
-                videos_url, videos_path = await edit_post_page(videos_path, title, vcontent, BASE_URL)
+                videos_url, videos_paths = await edit_paginated_page(videos_paths, title, vcontent, BASE_URL)
         else:
             # Легаси-пост с единственной статьёй
             ordered = ([cover] + [b for b in blocks if b is not cover]) if cover else blocks
-            photos_url, photos_path = await edit_post_page(post["telegraph_path"], title, ordered, BASE_URL)
+            photos_url, photos_paths = await edit_paginated_page([post["telegraph_path"]], title, ordered, BASE_URL)
     except Exception as e:
         logger.exception("edit telegraph failed")
         raise HTTPException(status_code=500, detail=f"Ошибка Telegraph: {e}")
@@ -544,11 +550,13 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
             "title": title,
             "blocks": blocks,
             "telegraph_url": photos_url or videos_url,
-            "telegraph_path": photos_path or videos_path,
+            "telegraph_path": (photos_paths or videos_paths or [None])[0],
             "photos_url": photos_url,
-            "photos_path": photos_path,
+            "photos_path": photos_paths[0] if photos_paths else None,
+            "photos_paths": photos_paths,
             "videos_url": videos_url,
-            "videos_path": videos_path,
+            "videos_path": videos_paths[0] if videos_paths else None,
+            "videos_paths": videos_paths,
             "cover_url": cover["url"] if cover else None,
             "preview": desc[:200],
         }},
