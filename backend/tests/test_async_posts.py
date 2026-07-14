@@ -119,7 +119,7 @@ class TestDraftWithMedia:
             assert gj["media_done"] == 0
 
             # Also present in /api/posts list with status field, null telegraph_url
-            lst = client.get(f"{API}/posts").json()
+            lst = client.get(f"{API}/posts?page_size=100").json()["items"]
             match = next((p for p in lst if p["id"] == pid), None)
             assert match is not None
             assert "status" in match

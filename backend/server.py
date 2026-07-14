@@ -124,8 +124,19 @@ async def get_stats(user=Depends(auth.get_current_user)):
 
 # ---------- Posts ----------
 @api_router.get("/posts")
-async def get_posts(limit: int = 100, user=Depends(auth.get_current_user)):
-    return await db.posts.find({}, {"_id": 0, "blocks": 0}).sort("created_at", -1).to_list(limit)
+async def get_posts(page: int = 1, page_size: int = 20, user=Depends(auth.get_current_user)):
+    page = max(1, page)
+    page_size = min(100, max(1, page_size))
+    total = await db.posts.count_documents({})
+    skip = (page - 1) * page_size
+    items = await db.posts.find({}, {"_id": 0, "blocks": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "pages": max(1, (total + page_size - 1) // page_size),
+    }
 
 
 @api_router.get("/posts/{post_id}")

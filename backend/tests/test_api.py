@@ -113,7 +113,11 @@ class TestPostsList:
     def test_posts_list(self, client):
         r = client.get(f"{API}/posts")
         assert r.status_code == 200
-        posts = r.json()
+        data = r.json()
+        assert isinstance(data, dict)
+        for k in ("items", "total", "page", "page_size", "pages"):
+            assert k in data
+        posts = data["items"]
         assert isinstance(posts, list)
         for p in posts:
             assert "_id" not in p

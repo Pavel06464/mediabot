@@ -19,6 +19,8 @@ import {
   Droplets,
   UploadCloud,
   Pencil,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -87,21 +89,26 @@ export default function Dashboard() {
   const [publishing, setPublishing] = useState(null);
   const [channelOpen, setChannelOpen] = useState(false);
   const [watermarkOpen, setWatermarkOpen] = useState(false);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
 
   const load = useCallback(async () => {
     try {
       const [s, p, c] = await Promise.all([
-        api.get("/stats"), api.get("/posts"), api.get("/settings"),
+        api.get("/stats"),
+        api.get(`/posts?page=${page}&page_size=20`),
+        api.get("/settings"),
       ]);
       setStats(s.data);
-      setPosts(p.data);
+      setPosts(p.data.items);
+      setTotalPages(p.data.pages);
       setChannel(c.data.channel_id ? c.data : null);
     } catch (e) {
       // 401 handled by interceptor
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [page]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -315,6 +322,20 @@ export default function Dashboard() {
                 ))}
               </TableBody>
             </Table>
+          )}
+
+          {!loading && totalPages > 1 && (
+            <div className="px-6 py-4 border-t border-zinc-200 flex items-center justify-between" data-testid="pagination">
+              <span className="text-sm text-zinc-500">Страница {page} из {totalPages}</span>
+              <div className="flex items-center gap-2">
+                <Button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1} variant="outline" size="sm" className="rounded-none border-zinc-200 disabled:opacity-40" data-testid="pagination-prev">
+                  <ChevronLeft className="h-4 w-4 mr-1" /> Назад
+                </Button>
+                <Button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages} variant="outline" size="sm" className="rounded-none border-zinc-200 disabled:opacity-40" data-testid="pagination-next">
+                  Вперёд <ChevronRight className="h-4 w-4 ml-1" />
+                </Button>
+              </div>
+            </div>
           )}
         </div>
       </main>
