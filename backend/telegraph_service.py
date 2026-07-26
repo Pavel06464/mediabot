@@ -1,3 +1,4 @@
+import asyncio
 import html
 import logging
 import re
@@ -9,6 +10,29 @@ from database import db
 logger = logging.getLogger("telegraph_service")
 
 _telegraph = None
+
+# Максимальная пауза (сек), которую готовы подождать при коротком flood-лимите Telegraph
+FLOOD_MAX_WAIT = 30
+_FLOOD_RE = re.compile(r"retry in (\d+)", re.IGNORECASE)
+
+
+async def _call_with_flood_retry(factory, attempts=6):
+    """Вызывает Telegraph-операцию (create/edit page); при коротком flood-лимите ждёт и повторяет."""
+    last = None
+    for _ in range(attempts):
+        try:
+            return await factory()
+        except Exception as e:
+            last = e
+            msg = str(e)
+            m = _FLOOD_RE.search(msg)
+            if "flood" in msg.lower() and m and int(m.group(1)) <= FLOOD_MAX_WAIT:
+                wait = int(m.group(1)) + 1
+                logger.warning("Telegraph flood control, waiting %ss then retrying", wait)
+                await asyncio.sleep(wait)
+                continue
+            raise
+    raise last
 
 
 def _inline_md(escaped: str) -> str:
@@ -152,9 +176,13 @@ async def create_paginated_page(title, blocks, base_url, author_name="Media Post
     for i in range(total - 1, -1, -1):
         part_title = base_title if total == 1 else f"{base_title} ({i + 1}/{total})"
         content = build_html(chunks[i], base_url) + _nav_html(next_url, i + 2)
-        resp = await tg.create_page(title=part_title[:256], html_content=content, author_name=author_name[:128])
+        resp = await _call_with_flood_retry(
+            lambda c=content, t=part_title: tg.create_page(title=t[:256], html_content=c, author_name=author_name[:128])
+        )
         paths[i] = resp["path"]
         next_url = resp["url"]
+        if total > 1 and i > 0:
+            await asyncio.sleep(0.7)  # снижаем шанс поймать flood при многостраничных постах
     return next_url, paths  # next_url после i=0 — это url первой страницы
 
 
@@ -171,10 +199,16 @@ async def edit_paginated_page(paths, title, blocks, base_url, author_name="Media
         part_title = base_title if total == 1 else f"{base_title} ({i + 1}/{total})"
         content = build_html(chunks[i], base_url) + _nav_html(next_url, i + 2)
         if i < len(paths) and paths[i]:
-            resp = await tg.edit_page(path=paths[i], title=part_title[:256], html_content=content, author_name=author_name[:128])
+            resp = await _call_with_flood_retry(
+                lambda p=paths[i], c=content, t=part_title: tg.edit_page(path=p, title=t[:256], html_content=c, author_name=author_name[:128])
+            )
         else:
-            resp = await tg.create_page(title=part_title[:256], html_content=content, author_name=author_name[:128])
+            resp = await _call_with_flood_retry(
+                lambda c=content, t=part_title: tg.create_page(title=t[:256], html_content=c, author_name=author_name[:128])
+            )
         out_paths[i] = resp["path"]
         next_url = resp["url"]
+        if total > 1 and i > 0:
+            await asyncio.sleep(0.7)
     return next_url, out_paths
 

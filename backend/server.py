@@ -337,7 +337,12 @@ async def _finalize_post(post_id: str):
             videos_url, videos_paths = await create_paginated_page(post["title"], vcontent, BASE_URL, max_items=10)
     except Exception as e:
         logger.exception("finalize telegraph failed")
-        await db.posts.update_one({"id": post_id}, {"$set": {"status": "failed", "error": str(e)}})
+        err = str(e)
+        if "flood" in err.lower():
+            m = re.search(r"retry in (\d+)", err, re.I)
+            secs = m.group(1) if m else "несколько"
+            err = f"Telegraph ограничил создание статей (flood). Подождите ~{secs} сек и нажмите «Повторить»."
+        await db.posts.update_one({"id": post_id}, {"$set": {"status": "failed", "error": err}})
         return
     photos_path = photos_paths[0] if photos_paths else None
     videos_path = videos_paths[0] if videos_paths else None

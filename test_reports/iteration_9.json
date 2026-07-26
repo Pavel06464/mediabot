@@ -1,0 +1,24 @@
+{
+  "summary": "Verified Telegraph flood-control auto-retry fix. All 3 deterministic unit tests in test_flood_retry.py pass (short flood retried, long flood not retried, non-flood re-raised). Full backend pytest suite 72/72 green. Live regression against preview URL confirmed: (1) single photo draft finalizes to status=ready with telegra.ph URL, (2) 12-slot video draft paginates and finalizes with videos_url, (3) hashtags do not appear on the Telegraph article page.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_flood_retry.py",
+    "/app/backend/tests/live_regression.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py uses deprecated FastAPI @app.on_event('startup'); migrate to lifespan handlers (non-blocking).",
+    "server.py is 781 lines; consider splitting posts/media/auth routers into modules for maintainability.",
+    "_call_with_flood_retry parses 'Retry in N seconds' via string match; consider a compiled regex + max retry count cap to prevent an adversarial series of 30s waits from stalling requests indefinitely."
+  ],
+  "updated_files": ["/app/backend/tests/live_regression.py"],
+  "success_rate": {"backend": "100%", "frontend": "not tested (backend-only request)"},
+  "test_credentials": "admin@mediabot.local / admin123",
+  "seed_data_creation": "Live test created 2 TEST_ posts on preview and deleted them via DELETE /api/posts/{id}?delete_media=true.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Flood-retry fix verified. Live regression script at /app/backend/tests/live_regression.py exercises full photo+video multi-page flow against REACT_APP_BACKEND_URL and self-cleans; safe to rerun.",
+  "rca of the issue": "Original bug: Telegraph API rate-limits page creation per-account; a single post creating multiple pages (paginated) triggered short flood windows and surfaced 'Flood control exceeded. Retry in N seconds' to the user. Fix: telegraph_service._call_with_flood_retry parses the retry-in value, sleeps N+1 seconds and retries when N <= FLOOD_MAX_WAIT (30); create_paginated_page/edit_paginated_page also add asyncio.sleep(0.7) between pages to smooth burst rate. Long flood windows re-raise and server.py _finalize_post translates the raw error into a friendly RU message. Unit tests in test_flood_retry.py deterministically validate all three paths."
+}
