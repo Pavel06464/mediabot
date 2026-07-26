@@ -120,11 +120,12 @@ async def edit_post_page(path: str, title: str, blocks, base_url: str, author_na
 MAX_HTML = 40000  # безопасный порог размера html одной страницы
 
 
-def _chunk_blocks(blocks, base_url):
+def _chunk_blocks(blocks, base_url, max_items=None):
     chunks, cur, size = [], [], 0
     for b in blocks:
         bl = len(build_html([b], base_url))
-        if cur and size + bl > MAX_HTML:
+        too_big = cur and (size + bl > MAX_HTML or (max_items and len(cur) >= max_items))
+        if too_big:
             chunks.append(cur)
             cur, size = [], 0
         cur.append(b)
@@ -140,10 +141,10 @@ def _nav_html(next_url, part_no):
     return f'<p><a href="{next_url}">➡️ Продолжение — часть {part_no}</a></p>'
 
 
-async def create_paginated_page(title, blocks, base_url, author_name="Media Post Bot"):
+async def create_paginated_page(title, blocks, base_url, author_name="Media Post Bot", max_items=None):
     """Создаёт одну или несколько связанных Telegraph-страниц. Возвращает (url_первой, [paths])."""
     tg = await _get_telegraph()
-    chunks = _chunk_blocks(blocks, base_url)
+    chunks = _chunk_blocks(blocks, base_url, max_items)
     total = len(chunks)
     base_title = (title or "Untitled")
     paths = [None] * total
@@ -157,11 +158,11 @@ async def create_paginated_page(title, blocks, base_url, author_name="Media Post
     return next_url, paths  # next_url после i=0 — это url первой страницы
 
 
-async def edit_paginated_page(paths, title, blocks, base_url, author_name="Media Post Bot"):
+async def edit_paginated_page(paths, title, blocks, base_url, author_name="Media Post Bot", max_items=None):
     """Перерисовывает существующие страницы. Если чанков стало больше — создаёт недостающие.
     Возвращает (url_первой, [paths])."""
     tg = await _get_telegraph()
-    chunks = _chunk_blocks(blocks, base_url)
+    chunks = _chunk_blocks(blocks, base_url, max_items)
     total = len(chunks)
     base_title = (title or "Untitled")
     out_paths = [None] * total

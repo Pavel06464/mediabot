@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import api from "@/lib/api";
 import { MarkdownToolbar } from "@/components/MarkdownToolbar";
+import { HashtagsInput } from "@/components/HashtagsInput";
 
 export default function EditPost() {
   const navigate = useNavigate();
@@ -16,6 +17,7 @@ export default function EditPost() {
   const [saving, setSaving] = useState(false);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [hashtags, setHashtags] = useState([]);
   const [media, setMedia] = useState([]);
   const [link, setLink] = useState(null);
 
@@ -25,6 +27,7 @@ export default function EditPost() {
         const { data } = await api.get(`/posts/${id}/edit`);
         setTitle(data.title);
         setDescription(data.description || "");
+        setHashtags(data.hashtags || []);
         setMedia(data.media || []);
         setLink(data.telegraph_url);
       } catch (e) {
@@ -48,6 +51,7 @@ export default function EditPost() {
       await api.put(`/posts/${id}`, {
         title: title.trim(),
         description: description.trim(),
+        hashtags,
         media: media.map((m) => ({ idx: m.idx, caption: m.caption || "", is_cover: !!m.is_cover })),
       });
       toast.success("Статья обновлена");
@@ -91,6 +95,11 @@ export default function EditPost() {
           <MarkdownToolbar textareaRef={descRef} value={description} onChange={setDescription} />
           <Textarea ref={descRef} data-testid="edit-description" value={description} onChange={(e) => setDescription(e.target.value)}
             placeholder="Текст статьи. Поддержка: **жирный**, *курсив*, [ссылка](url), # заголовок, > цитата" className="rounded-none min-h-[120px]" />
+        </section>
+
+        <section>
+          <h2 className="text-lg font-bold tracking-tight mb-3">Хештеги</h2>
+          <HashtagsInput tags={hashtags} setTags={setHashtags} />
         </section>
 
         {media.length > 0 && (

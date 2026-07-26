@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import asyncio
 import tempfile
@@ -67,6 +68,7 @@ class DraftIn(BaseModel):
     title: str
     description: Optional[str] = ""
     publish_after: bool = False
+    hashtags: List[str] = []
     media: List[MediaDesc] = []
 
 
@@ -79,7 +81,32 @@ class MediaEdit(BaseModel):
 class PostEditIn(BaseModel):
     title: str
     description: Optional[str] = ""
+    hashtags: List[str] = []
     media: List[MediaEdit] = []
+
+
+def _normalize_tags(raw):
+    tags = []
+    for item in raw or []:
+        for piece in re.split(r"[\s,]+", str(item)):
+            t = piece.strip().lstrip("#")
+            t = re.sub(r"[^\wа-яёА-ЯЁ]", "", t, flags=re.UNICODE)
+            if t:
+                tags.append("#" + t)
+    seen, out = set(), []
+    for t in tags:
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out
+
+
+def _compose_description(description, tags):
+    desc = (description or "").strip()
+    tagline = " ".join(tags)
+    if desc and tagline:
+        return desc + "\n\n" + tagline
+    return desc or tagline
 
 
 # ---------- Auth ----------
@@ -124,12 +151,15 @@ async def get_stats(user=Depends(auth.get_current_user)):
 
 # ---------- Posts ----------
 @api_router.get("/posts")
-async def get_posts(page: int = 1, page_size: int = 20, user=Depends(auth.get_current_user)):
+async def get_posts(page: int = 1, page_size: int = 20, q: str = "", user=Depends(auth.get_current_user)):
     page = max(1, page)
     page_size = min(100, max(1, page_size))
-    total = await db.posts.count_documents({})
+    query = {}
+    if q and q.strip():
+        query["title"] = {"$regex": re.escape(q.strip()), "$options": "i"}
+    total = await db.posts.count_documents(query)
     skip = (page - 1) * page_size
-    items = await db.posts.find({}, {"_id": 0, "blocks": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    items = await db.posts.find(query, {"_id": 0, "blocks": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
     return {
         "items": items,
         "total": total,
@@ -222,19 +252,24 @@ def _publish_caption(post: dict) -> str:
         parts.append(f"🎬 Видео: {videos_url}")
     if not photos_url and not videos_url:
         parts.append(post.get("telegraph_url") or "")
+    if post.get("hashtags"):
+        parts.append("")
+        parts.append(" ".join(post["hashtags"]))
     return "\n".join(parts)
 
 
 async def _do_publish(post: dict, channel: dict):
     caption = _publish_caption(post)
+    res = None
     if post.get("cover_url"):
         try:
-            await telegram_api.send_photo(channel["channel_id"], post["cover_url"], caption)
+            res = await telegram_api.send_photo(channel["channel_id"], post["cover_url"], caption)
         except Exception as e:
             logger.warning("sendPhoto failed, fallback to sendMessage: %s", e)
-            await telegram_api.send_message(channel["channel_id"], caption)
+            res = await telegram_api.send_message(channel["channel_id"], caption)
     else:
-        await telegram_api.send_message(channel["channel_id"], caption)
+        res = await telegram_api.send_message(channel["channel_id"], caption)
+    return (res or {}).get("message_id")
 
 
 async def _store_bytes(content: bytes, ctype: str, kind: str, filename: str):
@@ -296,10 +331,10 @@ async def _finalize_post(post_id: str):
         # Статья с фото (или текстовая, если медиа нет вовсе). Текст идёт в фото-статью.
         if photos or not videos:
             photos_url, photos_paths = await create_paginated_page(post["title"], text_blocks + photos, BASE_URL)
-        # Отдельная статья с видео. Текст сюда — только если фото нет.
+        # Отдельная статья с видео (по 10 медиа на страницу — видео тяжело грузятся).
         if videos:
             vcontent = videos if photos else (text_blocks + videos)
-            videos_url, videos_paths = await create_paginated_page(post["title"], vcontent, BASE_URL)
+            videos_url, videos_paths = await create_paginated_page(post["title"], vcontent, BASE_URL, max_items=10)
     except Exception as e:
         logger.exception("finalize telegraph failed")
         await db.posts.update_one({"id": post_id}, {"$set": {"status": "failed", "error": str(e)}})
@@ -329,9 +364,10 @@ async def _finalize_post(post_id: str):
         if channel:
             try:
                 merged = {**post, **upd}
-                await _do_publish(merged, channel)
+                msg_id = await _do_publish(merged, channel)
                 published = True
                 channel_title = channel.get("channel_title")
+                upd["channel_message_id"] = msg_id
                 upd["status"] = "published"
             except Exception as e:
                 logger.warning("auto-publish failed: %s", e)
@@ -345,10 +381,13 @@ async def _finalize_post(post_id: str):
 async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
     if not payload.title.strip():
         raise HTTPException(status_code=400, detail="Укажите заголовок")
+    tags = _normalize_tags(payload.hashtags)
+    full_desc = _compose_description(payload.description, tags)
     blocks = []
-    if payload.description and payload.description.strip():
-        blocks.append({"type": "text", "value": payload.description.strip()})
+    if full_desc:
+        blocks.append({"type": "text", "value": full_desc})
     slots = []
+    photo_count = video_count = 0
     for m in payload.media:
         idx = len(blocks)
         blocks.append({
@@ -356,6 +395,10 @@ async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
             "url": None, "media_id": None, "pending": True,
         })
         slots.append(idx)
+        if m.kind == "photo":
+            photo_count += 1
+        elif m.kind == "video":
+            video_count += 1
     post_id = str(uuid.uuid4())
     doc = {
         "id": post_id,
@@ -365,16 +408,20 @@ async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
         "telegraph_path": None,
         "cover_url": None,
         "blocks": blocks,
+        "hashtags": tags,
         "media_ids": [],
         "r2_keys": [],
         "media_count": len(slots),
+        "photo_count": photo_count,
+        "video_count": video_count,
         "media_total": len(slots),
         "media_done": 0,
         "block_count": len(blocks),
-        "preview": (payload.description or "")[:200],
+        "preview": (full_desc or "")[:200],
         "publish_after": payload.publish_after,
         "published": False,
         "channel_title": None,
+        "channel_message_id": None,
         "status": "uploading" if slots else "processing",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -418,9 +465,9 @@ async def upload_media_slot(post_id: str, idx: int, file: UploadFile = File(...)
         url, media_id, r2_key = await _store_bytes(content, ctype, "photo", file.filename or "")
     else:
         path, size = await _stream_to_temp(file)
-        if size > 2 * 1024 * 1024 * 1024:
+        if size > 5 * 1024 * 1024 * 1024:
             os.unlink(path)
-            raise HTTPException(status_code=400, detail="Видео больше 2 ГБ")
+            raise HTTPException(status_code=400, detail="Видео больше 5 ГБ")
         try:
             url, media_id, r2_key = await _store_temp(path, ctype, "video", file.filename or "")
         finally:
@@ -460,33 +507,41 @@ async def publish_post(post_id: str, user=Depends(auth.get_current_user)):
     if not channel:
         raise HTTPException(status_code=400, detail="Сначала настройте канал в настройках")
     try:
-        await _do_publish(post, channel)
+        msg_id = await _do_publish(post, channel)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка публикации: {e}")
     await db.posts.update_one(
         {"id": post_id},
-        {"$set": {"published": True, "status": "published", "channel_title": channel.get("channel_title")}},
+        {"$set": {"published": True, "status": "published", "channel_title": channel.get("channel_title"), "channel_message_id": msg_id}},
     )
     return {"status": "published", "channel_title": channel.get("channel_title")}
 
 
 @api_router.delete("/posts/{post_id}")
-async def delete_post(post_id: str, user=Depends(auth.get_current_user)):
+async def delete_post(post_id: str, delete_channel: bool = False, delete_media: bool = True, user=Depends(auth.get_current_user)):
     post = await db.posts.find_one({"id": post_id})
     if not post:
         raise HTTPException(status_code=404, detail="Пост не найден")
-    bucket = get_gridfs()
-    for mid in post.get("media_ids", []):
-        try:
-            await bucket.delete(ObjectId(mid))
-        except Exception:
-            pass
-    if storage.r2_enabled():
-        for key in post.get("r2_keys", []):
+    if delete_channel and post.get("channel_message_id"):
+        channel = await db.app_config.find_one({"_id": "channel"})
+        if channel:
             try:
-                await asyncio.to_thread(storage.delete_file, key)
+                await telegram_api.delete_message(channel["channel_id"], post["channel_message_id"])
+            except Exception as e:
+                logger.warning("delete channel message failed: %s", e)
+    if delete_media:
+        bucket = get_gridfs()
+        for mid in post.get("media_ids", []):
+            try:
+                await bucket.delete(ObjectId(mid))
             except Exception:
-                logger.warning("R2 delete failed for key %s", key)
+                pass
+        if storage.r2_enabled():
+            for key in post.get("r2_keys", []):
+                try:
+                    await asyncio.to_thread(storage.delete_file, key)
+                except Exception:
+                    logger.warning("R2 delete failed for key %s", key)
     await db.posts.delete_one({"id": post_id})
     return {"status": "deleted"}
 
@@ -503,11 +558,15 @@ async def get_post_for_edit(post_id: str, user=Depends(auth.get_current_user)):
         {"idx": i, "kind": b["type"], "url": b.get("url"), "caption": b.get("caption", ""), "is_cover": bool(b.get("is_cover"))}
         for i, b in enumerate(blocks) if b["type"] in ("photo", "video")
     ]
-    description = next((b.get("value", "") for b in blocks if b["type"] == "text"), "")
+    raw_text = next((b.get("value", "") for b in blocks if b["type"] == "text"), "")
+    tags = post.get("hashtags", [])
+    tagline = " ".join(tags)
+    description = raw_text[:-len(tagline)].rstrip() if tagline and raw_text.endswith(tagline) else raw_text
     return {
         "id": post["id"],
         "title": post["title"],
         "description": description,
+        "hashtags": tags,
         "telegraph_url": post.get("telegraph_url"),
         "media": media,
     }
@@ -529,10 +588,14 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
             blocks[m.idx]["caption"] = m.caption or ""
             blocks[m.idx]["is_cover"] = bool(m.is_cover)
 
-    desc = (payload.description or "").strip()
+    tags = _normalize_tags(payload.hashtags)
+    desc = _compose_description(payload.description, tags)
     text_idx = next((i for i, b in enumerate(blocks) if b["type"] == "text"), None)
     if text_idx is not None:
-        blocks[text_idx]["value"] = desc
+        if desc:
+            blocks[text_idx]["value"] = desc
+        else:
+            blocks.pop(text_idx)
     elif desc:
         blocks.insert(0, {"type": "text", "value": desc})
 
@@ -546,7 +609,7 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
                 photos_url, photos_paths = await edit_paginated_page(photos_paths, title, text_blocks + photos, BASE_URL)
             if videos_paths:
                 vcontent = videos if photos else (text_blocks + videos)
-                videos_url, videos_paths = await edit_paginated_page(videos_paths, title, vcontent, BASE_URL)
+                videos_url, videos_paths = await edit_paginated_page(videos_paths, title, vcontent, BASE_URL, max_items=10)
         else:
             # Легаси-пост с единственной статьёй
             ordered = ([cover] + [b for b in blocks if b is not cover]) if cover else blocks
@@ -560,6 +623,7 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
         {"$set": {
             "title": title,
             "blocks": blocks,
+            "hashtags": tags,
             "telegraph_url": photos_url or videos_url,
             "telegraph_path": (photos_paths or videos_paths or [None])[0],
             "photos_url": photos_url,

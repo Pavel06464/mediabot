@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import { useUpload } from "@/context/UploadContext";
 import { MarkdownToolbar } from "@/components/MarkdownToolbar";
+import { HashtagsInput } from "@/components/HashtagsInput";
 
 let idc = 0;
 const nid = () => `m${++idc}`;
@@ -43,6 +44,7 @@ export default function PostEditor() {
   const { startJob } = useUpload();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [hashtags, setHashtags] = useState([]);
   const descRef = useRef(null);
   const [cover, setCover] = useState(null); // {file, localUrl}
   const [photos, setPhotos] = useState([]);
@@ -78,7 +80,7 @@ export default function PostEditor() {
     photos.forEach((p) => items.push({ kind: "photo", is_cover: false, caption: p.caption, file: p.file }));
     videos.forEach((v) => items.push({ kind: "video", is_cover: false, caption: v.caption, file: v.file }));
 
-    startJob({ meta: { title: title.trim(), description: description.trim(), publish_after: publishAfter }, items });
+    startJob({ meta: { title: title.trim(), description: description.trim(), publish_after: publishAfter, hashtags }, items });
     toast.info("Загрузка началась — следите за прогрессом на дашборде");
     navigate("/");
   };
@@ -130,6 +132,14 @@ export default function PostEditor() {
           <MarkdownToolbar textareaRef={descRef} value={description} onChange={setDescription} />
           <Textarea ref={descRef} data-testid="editor-description" value={description} onChange={(e) => setDescription(e.target.value)}
             placeholder="Текст статьи (необязательно). Поддержка: **жирный**, *курсив*, [ссылка](url), # заголовок, > цитата" className="rounded-none min-h-[120px]" />
+        </section>
+
+        <section>
+          <div className="flex items-center gap-2 mb-3">
+            <h2 className="text-lg font-bold tracking-tight">Хештеги</h2>
+            <span className="text-sm text-zinc-400">— добавятся в описание и в пост канала</span>
+          </div>
+          <HashtagsInput tags={hashtags} setTags={setHashtags} />
         </section>
 
         <section>

@@ -21,9 +21,20 @@ import {
   Pencil,
   ChevronLeft,
   ChevronRight,
+  Search,
+  AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import {
   Table,
   TableBody,
@@ -91,12 +102,18 @@ export default function Dashboard() {
   const [watermarkOpen, setWatermarkOpen] = useState(false);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
+  const [qInput, setQInput] = useState("");
+  const [q, setQ] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [delChannel, setDelChannel] = useState(false);
+  const [delMedia, setDelMedia] = useState(true);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const [s, p, c] = await Promise.all([
         api.get("/stats"),
-        api.get(`/posts?page=${page}&page_size=20`),
+        api.get(`/posts?page=${page}&page_size=20&q=${encodeURIComponent(q)}`),
         api.get("/settings"),
       ]);
       setStats(s.data);
@@ -108,7 +125,12 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [page]);
+  }, [page, q]);
+
+  useEffect(() => {
+    const t = setTimeout(() => { setQ(qInput); setPage(1); }, 400);
+    return () => clearTimeout(t);
+  }, [qInput]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -135,15 +157,66 @@ export default function Dashboard() {
     }
   };
 
-  const removePost = async (id) => {
-    try { await api.delete(`/posts/${id}`); toast.success("Пост удалён"); load(); }
-    catch { toast.error("Ошибка удаления"); }
+  const removePost = (post) => {
+    setDeleteTarget(post);
+    setDelChannel(false);
+    setDelMedia(true);
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/posts/${deleteTarget.id}?delete_channel=${delChannel}&delete_media=${delMedia}`);
+      toast.success("Пост удалён");
+      setDeleteTarget(null);
+      load();
+    } catch {
+      toast.error("Ошибка удаления");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
     <div className="min-h-screen bg-[#F9FAFB]">
       <ChannelSettings open={channelOpen} onOpenChange={setChannelOpen} onChange={load} />
       <WatermarkSettings open={watermarkOpen} onOpenChange={setWatermarkOpen} />
+
+      <Dialog open={!!deleteTarget} onOpenChange={(o) => !o && setDeleteTarget(null)}>
+        <DialogContent className="rounded-none sm:max-w-md" data-testid="delete-dialog">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertTriangle className="h-5 w-5 text-[#FF3333]" /> Удалить пост?
+            </DialogTitle>
+            <DialogDescription>
+              «{deleteTarget?.title}» будет удалён из панели. Выберите, что ещё удалить.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox checked={delChannel} onCheckedChange={(v) => setDelChannel(!!v)} data-testid="del-channel-checkbox" disabled={!deleteTarget?.channel_message_id} />
+              <span className="text-sm">
+                Удалить сообщение в канале
+                {!deleteTarget?.channel_message_id && <span className="block text-xs text-zinc-400">(этот пост не публиковался — нечего удалять)</span>}
+              </span>
+            </label>
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox checked={delMedia} onCheckedChange={(v) => setDelMedia(!!v)} data-testid="del-media-checkbox" />
+              <span className="text-sm">
+                Удалить медиафайлы на хостинге
+                <span className="block text-xs text-zinc-400">(фото и видео из R2/хранилища — освободит место)</span>
+              </span>
+            </label>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteTarget(null)} className="rounded-none border-zinc-200" data-testid="del-cancel">Отмена</Button>
+            <Button onClick={confirmDelete} disabled={deleting} className="rounded-none bg-[#FF3333] hover:bg-[#CC0000] text-white" data-testid="del-confirm">
+              {deleting ? "Удаляю…" : "Удалить"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <header className="sticky top-0 z-50 bg-white border-b border-zinc-200">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
@@ -231,9 +304,21 @@ export default function Dashboard() {
         )}
 
         <div className="bg-white border border-zinc-200" data-testid="posts-table">
-          <div className="px-6 py-4 border-b border-zinc-200 flex items-center justify-between">
+          <div className="px-6 py-4 border-b border-zinc-200 flex items-center justify-between gap-4 flex-wrap">
             <span className="label-caps text-zinc-500">История постов</span>
-            <span className="text-sm text-zinc-400">{channel ? `Канал: ${channel.channel_title}` : "Канал не настроен"}</span>
+            <div className="flex items-center gap-4">
+              <div className="relative">
+                <Search className="h-4 w-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  value={qInput}
+                  onChange={(e) => setQInput(e.target.value)}
+                  placeholder="Поиск по заголовку…"
+                  className="pl-9 pr-3 py-2 border border-zinc-200 text-sm outline-none focus:border-[#0055FF] w-56"
+                  data-testid="posts-search"
+                />
+              </div>
+              <span className="text-sm text-zinc-400 whitespace-nowrap">{channel ? `Канал: ${channel.channel_title}` : "Канал не настроен"}</span>
+            </div>
           </div>
 
           {loading ? (
@@ -241,10 +326,12 @@ export default function Dashboard() {
           ) : posts.length === 0 ? (
             <div className="p-16 text-center">
               <FileText className="h-10 w-10 text-zinc-300 mx-auto mb-4" />
-              <p className="text-zinc-500 font-medium">Постов пока нет</p>
-              <Button onClick={() => navigate("/new")} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white mt-4">
-                <Plus className="h-4 w-4 mr-2" /> Создать первый пост
-              </Button>
+              <p className="text-zinc-500 font-medium">{q ? "Ничего не найдено" : "Постов пока нет"}</p>
+              {!q && (
+                <Button onClick={() => navigate("/new")} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white mt-4">
+                  <Plus className="h-4 w-4 mr-2" /> Создать первый пост
+                </Button>
+              )}
             </div>
           ) : (
             <Table>
@@ -274,12 +361,40 @@ export default function Dashboard() {
                     <TableCell className="font-semibold max-w-[240px] truncate">{p.title}</TableCell>
                     <TableCell className="text-sm text-zinc-500 whitespace-nowrap">{fmtDate(p.created_at)}</TableCell>
                     <TableCell className="text-center">
-                      <div className="flex justify-center items-center gap-1.5 text-zinc-600">
-                        <Layers className="h-3.5 w-3.5" /> <span className="text-sm font-medium">{p.media_count}</span>
+                      <div className="flex justify-center items-center gap-3 text-zinc-600">
+                        <span className="flex items-center gap-1" title="Фото" data-testid={`photo-count-${p.id}`}>
+                          <ImageIcon className="h-3.5 w-3.5" /> <span className="text-sm font-medium">{p.photo_count ?? 0}</span>
+                        </span>
+                        <span className="flex items-center gap-1" title="Видео" data-testid={`video-count-${p.id}`}>
+                          <Film className="h-3.5 w-3.5" /> <span className="text-sm font-medium">{p.video_count ?? 0}</span>
+                        </span>
                       </div>
                     </TableCell>
                     <TableCell>
-                      {p.telegraph_url ? (
+                      {p.photos_url || p.videos_url ? (
+                        <div className="flex flex-col gap-1">
+                          {p.photos_url && (
+                            <div className="flex items-center gap-2" data-testid={`photos-link-${p.id}`}>
+                              <a href={p.photos_url} target="_blank" rel="noreferrer" className="text-[#0055FF] font-mono text-xs hover:underline flex items-center gap-1">
+                                📷 фото <ExternalLink className="h-3 w-3" />
+                              </a>
+                              <button onClick={() => copyLink(p.photos_url)} className="text-zinc-400 hover:text-zinc-900" data-testid={`copy-photos-${p.id}`}>
+                                <Copy className="h-3 w-3" />
+                              </button>
+                            </div>
+                          )}
+                          {p.videos_url && (
+                            <div className="flex items-center gap-2" data-testid={`videos-link-${p.id}`}>
+                              <a href={p.videos_url} target="_blank" rel="noreferrer" className="text-[#0055FF] font-mono text-xs hover:underline flex items-center gap-1">
+                                🎬 видео <ExternalLink className="h-3 w-3" />
+                              </a>
+                              <button onClick={() => copyLink(p.videos_url)} className="text-zinc-400 hover:text-zinc-900" data-testid={`copy-videos-${p.id}`}>
+                                <Copy className="h-3 w-3" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      ) : p.telegraph_url ? (
                         <div className="flex items-center gap-2">
                           <a href={p.telegraph_url} target="_blank" rel="noreferrer" className="text-[#0055FF] font-mono text-xs hover:underline flex items-center gap-1" data-testid={`open-link-${p.id}`}>
                             {p.telegraph_url.replace("https://", "").slice(0, 22)}… <ExternalLink className="h-3 w-3" />
@@ -313,7 +428,7 @@ export default function Dashboard() {
                         <button onClick={() => navigate(`/edit/${p.id}`)} disabled={!p.telegraph_url} className="p-2 text-zinc-400 hover:text-[#0055FF] disabled:opacity-30 disabled:hover:text-zinc-400" title="Редактировать" data-testid={`edit-${p.id}`}>
                           <Pencil className="h-4 w-4" />
                         </button>
-                        <button onClick={() => removePost(p.id)} className="p-2 text-zinc-400 hover:text-[#FF3333]" data-testid={`delete-${p.id}`}>
+                        <button onClick={() => removePost(p)} className="p-2 text-zinc-400 hover:text-[#FF3333]" data-testid={`delete-${p.id}`}>
                           <Trash2 className="h-4 w-4" />
                         </button>
                       </div>

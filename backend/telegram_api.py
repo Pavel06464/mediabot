@@ -52,3 +52,12 @@ async def send_photo(chat_id, photo_url: str, caption: str):
         if not data.get("ok"):
             raise ValueError(data.get("description", "Ошибка Telegram"))
         return data["result"]
+
+
+async def delete_message(chat_id, message_id):
+    async with httpx.AsyncClient(timeout=15) as c:
+        r = await c.post(f"{_api()}/deleteMessage", json={"chat_id": chat_id, "message_id": message_id})
+        data = r.json()
+        if not data.get("ok"):
+            raise ValueError(data.get("description", "Ошибка Telegram"))
+        return True
