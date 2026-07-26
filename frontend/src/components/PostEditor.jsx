@@ -137,7 +137,7 @@ export default function PostEditor() {
         <section>
           <div className="flex items-center gap-2 mb-3">
             <h2 className="text-lg font-bold tracking-tight">Хештеги</h2>
-            <span className="text-sm text-zinc-400">— добавятся в описание и в пост канала</span>
+            <span className="text-sm text-zinc-400">— добавятся в сообщение канала (не в статью)</span>
           </div>
           <HashtagsInput tags={hashtags} setTags={setHashtags} />
         </section>

@@ -382,10 +382,10 @@ async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
     if not payload.title.strip():
         raise HTTPException(status_code=400, detail="Укажите заголовок")
     tags = _normalize_tags(payload.hashtags)
-    full_desc = _compose_description(payload.description, tags)
+    desc_text = (payload.description or "").strip()
     blocks = []
-    if full_desc:
-        blocks.append({"type": "text", "value": full_desc})
+    if desc_text:
+        blocks.append({"type": "text", "value": desc_text})
     slots = []
     photo_count = video_count = 0
     for m in payload.media:
@@ -417,7 +417,7 @@ async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
         "media_total": len(slots),
         "media_done": 0,
         "block_count": len(blocks),
-        "preview": (full_desc or "")[:200],
+        "preview": (desc_text or "")[:200],
         "publish_after": payload.publish_after,
         "published": False,
         "channel_title": None,
@@ -589,7 +589,7 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
             blocks[m.idx]["is_cover"] = bool(m.is_cover)
 
     tags = _normalize_tags(payload.hashtags)
-    desc = _compose_description(payload.description, tags)
+    desc = (payload.description or "").strip()
     text_idx = next((i for i, b in enumerate(blocks) if b["type"] == "text"), None)
     if text_idx is not None:
         if desc:
