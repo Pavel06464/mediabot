@@ -587,11 +587,24 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
     if not post.get("telegraph_path"):
         raise HTTPException(status_code=400, detail="Статья ещё создаётся, редактирование недоступно")
     blocks = post.get("blocks", [])
+    kept = {m.idx: m for m in payload.media}
 
-    for m in payload.media:
-        if 0 <= m.idx < len(blocks) and blocks[m.idx]["type"] in ("photo", "video"):
-            blocks[m.idx]["caption"] = m.caption or ""
-            blocks[m.idx]["is_cover"] = bool(m.is_cover)
+    new_blocks = []
+    removed_media_ids, removed_r2_keys = [], []
+    for i, b in enumerate(blocks):
+        if b["type"] in ("photo", "video"):
+            if i in kept:
+                b["caption"] = kept[i].caption or ""
+                b["is_cover"] = bool(kept[i].is_cover)
+                new_blocks.append(b)
+            else:
+                if b.get("media_id"):
+                    removed_media_ids.append(b["media_id"])
+                if b.get("r2_key"):
+                    removed_r2_keys.append(b["r2_key"])
+        else:
+            new_blocks.append(b)
+    blocks = new_blocks
 
     tags = _normalize_tags(payload.hashtags)
     desc = (payload.description or "").strip()
@@ -611,10 +624,19 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
     try:
         if photos_paths or videos_paths:
             if photos_paths:
-                photos_url, photos_paths = await edit_paginated_page(photos_paths, title, text_blocks + photos, BASE_URL)
+                pcontent = text_blocks + photos
+                vcontent = videos
+                if pcontent:
+                    photos_url, photos_paths = await edit_paginated_page(photos_paths, title, pcontent, BASE_URL)
+                else:
+                    photos_url, photos_paths = None, []
+            else:
+                vcontent = text_blocks + videos
             if videos_paths:
-                vcontent = videos if photos else (text_blocks + videos)
-                videos_url, videos_paths = await edit_paginated_page(videos_paths, title, vcontent, BASE_URL, max_items=10)
+                if vcontent:
+                    videos_url, videos_paths = await edit_paginated_page(videos_paths, title, vcontent, BASE_URL, max_items=10)
+                else:
+                    videos_url, videos_paths = None, []
         else:
             # Легаси-пост с единственной статьёй
             ordered = ([cover] + [b for b in blocks if b is not cover]) if cover else blocks
@@ -623,6 +645,8 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
         logger.exception("edit telegraph failed")
         raise HTTPException(status_code=500, detail=f"Ошибка Telegraph: {e}")
 
+    media_ids = [b["media_id"] for b in blocks if b.get("media_id")]
+    r2_keys = [b["r2_key"] for b in blocks if b.get("r2_key")]
     await db.posts.update_one(
         {"id": post_id},
         {"$set": {
@@ -638,9 +662,30 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
             "videos_path": videos_paths[0] if videos_paths else None,
             "videos_paths": videos_paths,
             "cover_url": cover["url"] if cover else None,
+            "media_ids": media_ids,
+            "r2_keys": r2_keys,
+            "photo_count": len(photos),
+            "video_count": len(videos),
+            "media_count": len(photos) + len(videos),
             "preview": desc[:200],
         }},
     )
+
+    # Удаляем файлы убранных медиа с хостинга
+    if removed_media_ids or removed_r2_keys:
+        bucket = get_gridfs()
+        for mid in removed_media_ids:
+            try:
+                await bucket.delete(ObjectId(mid))
+            except Exception:
+                pass
+        if storage.r2_enabled():
+            for key in removed_r2_keys:
+                try:
+                    await asyncio.to_thread(storage.delete_file, key)
+                except Exception:
+                    logger.warning("R2 delete failed for key %s", key)
+
     return {"status": "updated", "telegraph_url": photos_url or videos_url}
 
 

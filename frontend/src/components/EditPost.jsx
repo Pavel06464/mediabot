@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, Star, Save, ExternalLink } from "lucide-react";
+import { ArrowLeft, Star, Save, ExternalLink, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -43,6 +43,8 @@ export default function EditPost() {
     setMedia((prev) => prev.map((m) => ({ ...m, is_cover: m.kind === "photo" && m.idx === idx })));
   const updCaption = (idx, caption) =>
     setMedia((prev) => prev.map((m) => (m.idx === idx ? { ...m, caption } : m)));
+  const removeMedia = (idx) =>
+    setMedia((prev) => prev.filter((m) => m.idx !== idx));
 
   const save = async () => {
     if (!title.trim()) return toast.error("Укажите заголовок");
@@ -104,10 +106,15 @@ export default function EditPost() {
 
         {media.length > 0 && (
           <section>
-            <h2 className="text-lg font-bold tracking-tight mb-3">Медиа <span className="text-sm text-zinc-400">— подписи и обложка</span></h2>
+            <h2 className="text-lg font-bold tracking-tight mb-3">Медиа <span className="text-sm text-zinc-400">— подписи, обложка, удаление</span></h2>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {media.map((m) => (
-                <div key={m.idx} className="bg-white border border-zinc-200 p-2" data-testid={`edit-media-${m.idx}`}>
+                <div key={m.idx} className="bg-white border border-zinc-200 p-2 relative" data-testid={`edit-media-${m.idx}`}>
+                  <button type="button" onClick={() => removeMedia(m.idx)}
+                    className="absolute top-3 right-3 z-10 bg-white/90 border border-zinc-200 text-zinc-600 hover:text-white hover:bg-[#FF3333] hover:border-[#FF3333] p-1.5 transition-colors duration-150"
+                    title="Удалить медиа" data-testid={`edit-remove-${m.idx}`}>
+                    <Trash2 className="h-4 w-4" />
+                  </button>
                   {m.kind === "photo" ? (
                     <img src={m.url} alt="" className="h-40 w-full object-contain bg-zinc-50" />
                   ) : (
@@ -124,6 +131,7 @@ export default function EditPost() {
                 </div>
               ))}
             </div>
+            <p className="text-xs text-zinc-400 mt-3">Удалённые медиа исчезнут из статьи и с хостинга после сохранения.</p>
           </section>
         )}
       </main>

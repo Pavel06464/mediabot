@@ -1,0 +1,24 @@
+{
+  "summary": "Verified EDIT-REMOVE media feature end-to-end. Backend: added /app/backend/tests/test_edit_remove.py with 3 tests (remove one video with GridFS 404 verification; remove all photos keeping videos; remove all videos keeping photo). Full backend suite: 75/75 passing (72 previous + 3 new). Frontend: reproduced the flow through the UI on the preview URL — login → API-seeded post with 1 photo + 2 videos finalized → open /edit/{id} → 3 edit-media-{idx} tiles rendered → click edit-remove-{idx} on a video → tile disappears client-side (2 tiles remain) → edit-save → dashboard photo-count and video-count both display 1 for the post → both photos-link and videos-link remain. Backend recomputes photo_count=1, video_count=1, media_count=2. GridFS file for removed video returns 404 on GET /api/media/{id} (deterministically verified in test_remove_one_video_deletes_gridfs_file: pre=200 -> post=404). Removing all photos keeps videos_url intact; removing all videos keeps photos_url intact. All TEST_ posts cleaned up via DELETE /api/posts/{id}?delete_media=true.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_edit_remove.py",
+    "/app/backend/tests/test_edit_and_validation.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py still uses deprecated @app.on_event('startup'); migrate to lifespan handlers.",
+    "server.py is 825 lines (posts/media/auth/settings all in one file); should be split into routers/services for maintainability.",
+    "edit_post: when all photos are removed but text_blocks remain, the photos article is re-rendered with just text (title + description). This is acceptable per spec ('or keep text-only page') but the empty photo article may look odd to users — consider deleting the page or adding a note. Non-blocking.",
+    "edit_post: GridFS/R2 delete failures are silently swallowed (except pass / logger.warning). Consider surfacing at least a counter/log entry so orphaned media are detectable."
+  ],
+  "updated_files": ["/app/backend/tests/test_edit_remove.py"],
+  "success_rate": {"backend": "100% (75/75)", "frontend": "100% (edit-remove E2E flow passed on preview URL)"},
+  "test_credentials": "admin@mediabot.local / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Live-created 4 TEST_ posts during this run (3 backend pytest + 1 frontend E2E); all deleted via DELETE /api/posts/{id}?delete_media=true in tear-down.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_edit_remove.py uses base64-encoded PNG + minimal MP4 ftyp box uploaded via /posts/{id}/media/{slot}. It exercises the KEEP-list PUT semantics, verifies photo/video/media counts, and does a GridFS 404 assertion by parsing media_id out of the /api/media/{id} URL returned by GET /posts/{id}/edit. Safe to rerun; each test self-cleans."
+}
