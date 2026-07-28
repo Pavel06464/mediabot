@@ -313,11 +313,20 @@ async def _do_publish_native(post: dict, channel: dict):
             filename, mime = telegram_api._guess(b["type"], url)
             item = {"type": b["type"], "path": path, "filename": filename, "mime": mime}
             if b["type"] == "video":
-                dur, w, h = await telegram_api.probe_video(path)
-                thumb = await telegram_api.extract_thumb(path)
+                fast = await telegram_api.remux_faststart(path)
+                if fast:
+                    tmp_paths.append(fast)
+                    item["path"] = fast
+                src = item["path"]
+                dur, w, h = await telegram_api.probe_video(src)
+                thumb = await telegram_api.extract_thumb(src)
                 if thumb:
                     thumb_paths.append(thumb)
                 item.update({"duration": dur, "width": w, "height": h, "thumb": thumb})
+                logger.info(
+                    "native video prep: faststart=%s thumb=%s dur=%s size=%sx%s file=%s",
+                    bool(fast), bool(thumb), dur, w, h, filename,
+                )
             prepared.append(item)
 
         # разбиваем на альбомы по 10

@@ -93,6 +93,32 @@ async def extract_thumb(path: str):
     return None
 
 
+async def remux_faststart(path: str):
+    """Перепаковывает mp4 c moov-атомом в начало (стрим + серверное превью).
+
+    Быстро (-c copy, без перекодирования). Возвращает путь к новому файлу
+    или None, если ffmpeg нет / перепаковка не удалась (тогда шлём оригинал).
+    """
+    if not shutil.which("ffmpeg"):
+        return None
+    fd, out = tempfile.mkstemp(prefix="fast_", suffix=".mp4")
+    os.close(fd)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", path, "-c", "copy", "-movflags", "+faststart", out,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+        if proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+    except Exception:
+        pass
+    if os.path.exists(out):
+        os.unlink(out)
+    return None
+
+
+
 async def get_chat(identifier):
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.get(f"{_api()}/getChat", params={"chat_id": identifier})
