@@ -73,8 +73,10 @@ export default function PostEditor() {
     if (!title.trim()) return toast.error("Укажите заголовок");
     if (!cover && !photos.length && !videos.length && !description.trim())
       return toast.error("Добавьте обложку, медиа или описание");
-    if (publishAfter && !cover && !photos.length)
-      return toast.error("Для публикации добавьте хотя бы одно фото (обложку)");
+    if (publishAfter && postType === "telegraph" && !cover && !photos.length)
+      return toast.error("Для публикации Telegraph-поста добавьте хотя бы одно фото (обложку)");
+    if (publishAfter && postType === "native" && !cover && !photos.length && !videos.length)
+      return toast.error("Для публикации добавьте хотя бы одно медиа");
 
     const items = [];
     if (cover?.file) items.push({ kind: "photo", is_cover: true, caption: "", file: cover.file });
