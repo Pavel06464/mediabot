@@ -285,7 +285,12 @@ def _native_caption(post: dict) -> str:
 
 
 async def _do_publish_native(post: dict, channel: dict):
-    """Публикует нативный пост — альбом(ы) прямо в канал (медиа по 10 в группе)."""
+    """Публикует нативный пост — альбом(ы) прямо в канал (медиа по 10 в группе).
+
+    Медиа скачивается с R2 во временный файл и отправляется multipart-ом (InputFile),
+    что обходит лимит Telegram в 20 МБ при загрузке по URL. Для файлов > 50 МБ
+    нужен Local Bot API Server (TELEGRAM_LOCAL_API_URL) — до 2 ГБ.
+    """
     blocks = post.get("blocks", [])
     _t, photos, videos, cover = _split_media(blocks)
     items = photos + videos  # cover уже первым среди photos (см. _split_media)
@@ -294,28 +299,42 @@ async def _do_publish_native(post: dict, channel: dict):
     caption = _native_caption(post)
     chat_id = channel["channel_id"]
     msg_ids = []
-    # разбиваем на альбомы по 10
-    chunks = [items[i:i + 10] for i in range(0, len(items), 10)]
-    for ci, chunk in enumerate(chunks):
-        if len(chunk) == 1:
-            b = chunk[0]
+    tmp_paths = []
+    try:
+        # скачиваем все медиа во временные файлы
+        prepared = []  # [{type, path, filename, mime}]
+        for b in items:
+            url = b.get("url")
+            if not url:
+                raise ValueError("У медиа нет ссылки на файл")
+            path = await telegram_api._download_to_temp(url)
+            tmp_paths.append(path)
+            filename, mime = telegram_api._guess(b["type"], url)
+            prepared.append({"type": b["type"], "path": path, "filename": filename, "mime": mime})
+
+        # разбиваем на альбомы по 10
+        chunks = [prepared[i:i + 10] for i in range(0, len(prepared), 10)]
+        for ci, chunk in enumerate(chunks):
             cap = caption if ci == 0 else ""
-            if b["type"] == "photo":
-                res = await telegram_api.send_photo(chat_id, b["url"], cap)
+            if len(chunk) == 1:
+                b = chunk[0]
+                if b["type"] == "photo":
+                    res = await telegram_api.send_photo_file(chat_id, b["path"], b["filename"], cap)
+                else:
+                    res = await telegram_api.send_video_file(chat_id, b["path"], b["filename"], cap)
+                msg_ids.append(res.get("message_id"))
             else:
-                res = await telegram_api.send_video(chat_id, b["url"], cap)
-            msg_ids.append(res.get("message_id"))
-        else:
-            media = []
-            for mi, b in enumerate(chunk):
-                item = {"type": "photo" if b["type"] == "photo" else "video", "media": b["url"]}
-                if ci == 0 and mi == 0 and caption:
-                    item["caption"] = caption
-                    item["parse_mode"] = "HTML"
-                media.append(item)
-            res = await telegram_api.send_media_group(chat_id, media)
-            msg_ids += [m.get("message_id") for m in res]
-    return msg_ids
+                if cap:
+                    chunk[0]["caption"] = cap
+                res = await telegram_api.send_media_group_files(chat_id, chunk)
+                msg_ids += [m.get("message_id") for m in res]
+        return msg_ids
+    finally:
+        for p in tmp_paths:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
 
 
 async def _finalize_native(post_id: str):

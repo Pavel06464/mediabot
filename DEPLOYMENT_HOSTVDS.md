@@ -88,7 +88,20 @@ newgrp docker   # применить группу без релогина
 
 ## 3. Local Bot API Server (файлы до 2 ГБ)
 
-Запускаем официальный сервер в Docker (образ `aiogram/telegram-bot-api`):
+**Быстрый способ — одной командой** (из папки проекта, от root):
+
+```bash
+bash setup_local_bot_api.sh <API_ID> <API_HASH> <BOT_TOKEN>
+```
+
+Скрипт сам: устанавливает Docker (если нужно), делает `logOut` бота из облака,
+поднимает контейнер `telegram-bot-api` на `127.0.0.1:8081`, прописывает
+`TELEGRAM_LOCAL_API_URL` в `backend/.env` и перезапускает бэкенд.
+
+> ⚠️ `logOut` обязателен: один и тот же токен нельзя использовать одновременно
+> в облаке `api.telegram.org` и на локальном сервере. Скрипт делает это автоматически.
+
+**Ручной способ** — запуск официального сервера в Docker (образ `aiogram/telegram-bot-api`):
 
 ```bash
 docker run -d --name telegram-bot-api \
