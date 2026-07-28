@@ -11,6 +11,12 @@ echo "==> Обновление зависимостей бэкенда"
 cd "$APP_DIR/backend"
 ./venv/bin/pip install -q -r requirements.txt
 
+echo "==> Проверка ffmpeg (обложки/метаданные видео для нативных постов)"
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "   ffmpeg не найден — устанавливаю"
+    apt-get install -y ffmpeg
+fi
+
 echo "==> Пересборка дашборда"
 cd "$APP_DIR/frontend"
 yarn install

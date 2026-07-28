@@ -300,9 +300,10 @@ async def _do_publish_native(post: dict, channel: dict):
     chat_id = channel["channel_id"]
     msg_ids = []
     tmp_paths = []
+    thumb_paths = []
     try:
-        # скачиваем все медиа во временные файлы
-        prepared = []  # [{type, path, filename, mime}]
+        # скачиваем все медиа во временные файлы (+ обложка/метаданные для видео)
+        prepared = []  # [{type, path, filename, mime, (video) thumb/width/height/duration}]
         for b in items:
             url = b.get("url")
             if not url:
@@ -310,7 +311,14 @@ async def _do_publish_native(post: dict, channel: dict):
             path = await telegram_api._download_to_temp(url)
             tmp_paths.append(path)
             filename, mime = telegram_api._guess(b["type"], url)
-            prepared.append({"type": b["type"], "path": path, "filename": filename, "mime": mime})
+            item = {"type": b["type"], "path": path, "filename": filename, "mime": mime}
+            if b["type"] == "video":
+                dur, w, h = await telegram_api.probe_video(path)
+                thumb = await telegram_api.extract_thumb(path)
+                if thumb:
+                    thumb_paths.append(thumb)
+                item.update({"duration": dur, "width": w, "height": h, "thumb": thumb})
+            prepared.append(item)
 
         # разбиваем на альбомы по 10
         chunks = [prepared[i:i + 10] for i in range(0, len(prepared), 10)]
@@ -321,7 +329,11 @@ async def _do_publish_native(post: dict, channel: dict):
                 if b["type"] == "photo":
                     res = await telegram_api.send_photo_file(chat_id, b["path"], b["filename"], cap)
                 else:
-                    res = await telegram_api.send_video_file(chat_id, b["path"], b["filename"], cap)
+                    res = await telegram_api.send_video_file(
+                        chat_id, b["path"], b["filename"], cap,
+                        thumb=b.get("thumb"), width=b.get("width"),
+                        height=b.get("height"), duration=b.get("duration"),
+                    )
                 msg_ids.append(res.get("message_id"))
             else:
                 if cap:
@@ -330,7 +342,7 @@ async def _do_publish_native(post: dict, channel: dict):
                 msg_ids += [m.get("message_id") for m in res]
         return msg_ids
     finally:
-        for p in tmp_paths:
+        for p in tmp_paths + thumb_paths:
             try:
                 os.unlink(p)
             except Exception:

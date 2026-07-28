@@ -19,7 +19,7 @@ if ! swapon --show 2>/dev/null | grep -q '/swapfile'; then
 fi
 
 apt update
-apt install -y python3-venv python3-pip git nginx curl gnupg ca-certificates
+apt install -y python3-venv python3-pip git nginx curl gnupg ca-certificates ffmpeg
 
 echo "==> [2/5] Пользователь deploy"
 if ! id deploy >/dev/null 2>&1; then

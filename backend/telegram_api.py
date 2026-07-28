@@ -1,5 +1,7 @@
 import os
 import json
+import shutil
+import asyncio
 import tempfile
 import httpx
 
@@ -44,6 +46,51 @@ async def _download_to_temp(url: str) -> str:
         if os.path.exists(path):
             os.unlink(path)
         raise
+
+
+async def probe_video(path: str):
+    """Через ffprobe возвращает (duration_sec, width, height) или (None, None, None)."""
+    if not shutil.which("ffprobe"):
+        return None, None, None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height:format=duration",
+            "-of", "json", path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        info = json.loads(out or b"{}")
+        st = (info.get("streams") or [{}])[0]
+        w, h = st.get("width"), st.get("height")
+        dur = info.get("format", {}).get("duration")
+        dur = int(float(dur)) if dur else None
+        return dur, w, h
+    except Exception:
+        return None, None, None
+
+
+async def extract_thumb(path: str):
+    """Через ffmpeg извлекает JPEG-обложку (<=320px), возвращает путь или None."""
+    if not shutil.which("ffmpeg"):
+        return None
+    fd, thumb = tempfile.mkstemp(prefix="thumb_", suffix=".jpg")
+    os.close(fd)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-ss", "0", "-i", path, "-vframes", "1",
+            "-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+            "-q:v", "4", thumb,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+        if os.path.exists(thumb) and os.path.getsize(thumb) > 0:
+            return thumb
+    except Exception:
+        pass
+    if os.path.exists(thumb):
+        os.unlink(thumb)
+    return None
 
 
 async def get_chat(identifier):
@@ -138,20 +185,42 @@ async def send_photo_file(chat_id, path: str, filename: str, caption: str):
     return data["result"]
 
 
-async def send_video_file(chat_id, path: str, filename: str, caption: str):
-    with open(path, "rb") as fh:
+async def send_video_file(chat_id, path: str, filename: str, caption: str,
+                          thumb: str = None, width=None, height=None, duration=None):
+    handles = []
+    try:
+        fh = open(path, "rb")
+        handles.append(fh)
         files = {"video": (filename, fh, "video/mp4")}
         form = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML", "supports_streaming": "true"}
+        if width:
+            form["width"] = str(width)
+        if height:
+            form["height"] = str(height)
+        if duration:
+            form["duration"] = str(duration)
+        if thumb:
+            tfh = open(thumb, "rb")
+            handles.append(tfh)
+            files["thumb"] = ("thumb.jpg", tfh, "image/jpeg")
+            form["thumbnail"] = "attach://thumb"
         async with httpx.AsyncClient(timeout=_LONG) as c:
             r = await c.post(f"{_api()}/sendVideo", data=form, files=files)
-    data = r.json()
-    if not data.get("ok"):
-        raise ValueError(data.get("description", "Ошибка Telegram"))
-    return data["result"]
+        data = r.json()
+        if not data.get("ok"):
+            raise ValueError(data.get("description", "Ошибка Telegram"))
+        return data["result"]
+    finally:
+        for fh in handles:
+            try:
+                fh.close()
+            except Exception:
+                pass
 
 
 async def send_media_group_files(chat_id, items: list):
-    """Альбом (2-10) multipart-ом. items: [{type, path, filename, mime, caption?}]."""
+    """Альбом (2-10) multipart-ом. items: [{type, path, filename, mime, caption?,
+    (для видео) thumb?, width?, height?, duration?}]."""
     handles = []
     try:
         media = []
@@ -162,6 +231,20 @@ async def send_media_group_files(chat_id, items: list):
             handles.append(fh)
             files[key] = (it["filename"], fh, it.get("mime") or ("video/mp4" if it["type"] == "video" else "image/jpeg"))
             m = {"type": it["type"], "media": f"attach://{key}"}
+            if it["type"] == "video":
+                m["supports_streaming"] = True
+                if it.get("width"):
+                    m["width"] = it["width"]
+                if it.get("height"):
+                    m["height"] = it["height"]
+                if it.get("duration"):
+                    m["duration"] = it["duration"]
+                if it.get("thumb"):
+                    tkey = f"thumb{i}"
+                    tfh = open(it["thumb"], "rb")
+                    handles.append(tfh)
+                    files[tkey] = ("thumb.jpg", tfh, "image/jpeg")
+                    m["thumbnail"] = f"attach://{tkey}"
             if it.get("caption"):
                 m["caption"] = it["caption"]
                 m["parse_mode"] = "HTML"
