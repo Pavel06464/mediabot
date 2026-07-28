@@ -371,7 +371,11 @@ export default function Dashboard() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      {p.photos_url || p.videos_url ? (
+                      {p.post_type === "native" ? (
+                        <span className="text-xs text-zinc-500 flex items-center gap-1" data-testid={`native-label-${p.id}`}>
+                          📎 альбом в канале
+                        </span>
+                      ) : p.photos_url || p.videos_url ? (
                         <div className="flex flex-col gap-1">
                           {p.photos_url && (
                             <div className="flex items-center gap-2" data-testid={`photos-link-${p.id}`}>
@@ -422,10 +426,10 @@ export default function Dashboard() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1">
-                        <Button onClick={() => publish(p.id)} disabled={publishing === p.id || !p.telegraph_url} size="sm" className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white h-8 disabled:opacity-40" data-testid={`publish-${p.id}`}>
+                        <Button onClick={() => publish(p.id)} disabled={publishing === p.id || !(p.status === "ready" || p.status === "published")} size="sm" className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white h-8 disabled:opacity-40" data-testid={`publish-${p.id}`}>
                           <Send className="h-3.5 w-3.5 mr-1.5" /> {p.published ? "Ещё раз" : "Опубликовать"}
                         </Button>
-                        <button onClick={() => navigate(`/edit/${p.id}`)} disabled={!p.telegraph_url} className="p-2 text-zinc-400 hover:text-[#0055FF] disabled:opacity-30 disabled:hover:text-zinc-400" title="Редактировать" data-testid={`edit-${p.id}`}>
+                        <button onClick={() => navigate(`/edit/${p.id}`)} disabled={!(p.status === "ready" || p.status === "published")} className="p-2 text-zinc-400 hover:text-[#0055FF] disabled:opacity-30 disabled:hover:text-zinc-400" title="Редактировать" data-testid={`edit-${p.id}`}>
                           <Pencil className="h-4 w-4" />
                         </button>
                         <button onClick={() => removePost(p)} className="p-2 text-zinc-400 hover:text-[#FF3333]" data-testid={`delete-${p.id}`}>

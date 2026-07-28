@@ -61,3 +61,25 @@ async def delete_message(chat_id, message_id):
         if not data.get("ok"):
             raise ValueError(data.get("description", "Ошибка Telegram"))
         return True
+
+
+async def send_media_group(chat_id, media: list):
+    """Отправляет альбом (2-10 медиа) по URL. media: [{type, media, caption?, parse_mode?}]."""
+    async with httpx.AsyncClient(timeout=300) as c:
+        r = await c.post(f"{_api()}/sendMediaGroup", json={"chat_id": str(chat_id), "media": media})
+        data = r.json()
+        if not data.get("ok"):
+            raise ValueError(data.get("description", "Ошибка Telegram"))
+        return data["result"]  # список сообщений
+
+
+async def send_video(chat_id, video_url: str, caption: str):
+    async with httpx.AsyncClient(timeout=120) as c:
+        r = await c.post(
+            f"{_api()}/sendVideo",
+            json={"chat_id": str(chat_id), "video": video_url, "caption": caption, "parse_mode": "HTML"},
+        )
+        data = r.json()
+        if not data.get("ok"):
+            raise ValueError(data.get("description", "Ошибка Telegram"))
+        return data["result"]

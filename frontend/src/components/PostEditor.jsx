@@ -50,6 +50,7 @@ export default function PostEditor() {
   const [photos, setPhotos] = useState([]);
   const [videos, setVideos] = useState([]);
   const [publishAfter, setPublishAfter] = useState(false);
+  const [postType, setPostType] = useState("telegraph");
 
   const onCover = useCallback((files) => {
     const f = files[0];
@@ -80,7 +81,7 @@ export default function PostEditor() {
     photos.forEach((p) => items.push({ kind: "photo", is_cover: false, caption: p.caption, file: p.file }));
     videos.forEach((v) => items.push({ kind: "video", is_cover: false, caption: v.caption, file: v.file }));
 
-    startJob({ meta: { title: title.trim(), description: description.trim(), publish_after: publishAfter, hashtags }, items });
+    startJob({ meta: { title: title.trim(), description: description.trim(), publish_after: publishAfter, hashtags, post_type: postType }, items });
     toast.info("Загрузка началась — следите за прогрессом на дашборде");
     navigate("/");
   };
@@ -93,7 +94,7 @@ export default function PostEditor() {
             <ArrowLeft className="h-4 w-4" /> Назад
           </button>
           <Button onClick={create} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="editor-save">
-            <Save className="h-4 w-4 mr-2" /> Создать статью
+            <Save className="h-4 w-4 mr-2" /> {postType === "native" ? "Создать пост" : "Создать статью"}
           </Button>
         </div>
       </header>
@@ -101,9 +102,27 @@ export default function PostEditor() {
       <main className="max-w-3xl mx-auto px-6 py-8 space-y-8">
         <div>
           <span className="label-caps text-zinc-400">Новый пост</span>
-          <Input data-testid="editor-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Заголовок статьи"
+          <Input data-testid="editor-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Заголовок"
             className="rounded-none border-0 border-b-2 border-zinc-200 px-0 text-3xl font-black tracking-tight h-auto py-3 mt-2 focus-visible:ring-0 focus-visible:border-[#0055FF]" />
         </div>
+
+        <section>
+          <h2 className="text-lg font-bold tracking-tight mb-3">Тип публикации</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <button type="button" onClick={() => setPostType("telegraph")}
+              className={`text-left p-4 border-2 transition-colors duration-150 ${postType === "telegraph" ? "border-[#0055FF] bg-blue-50" : "border-zinc-200 bg-white hover:border-zinc-300"}`}
+              data-testid="type-telegraph">
+              <p className="font-bold text-sm">Telegraph-статья</p>
+              <p className="text-xs text-zinc-500 mt-1">Ссылка на статью с большим предпросмотром. Подходит для больших альбомов и видео.</p>
+            </button>
+            <button type="button" onClick={() => setPostType("native")}
+              className={`text-left p-4 border-2 transition-colors duration-150 ${postType === "native" ? "border-[#0055FF] bg-blue-50" : "border-zinc-200 bg-white hover:border-zinc-300"}`}
+              data-testid="type-native">
+              <p className="font-bold text-sm">Обычный пост (альбом)</p>
+              <p className="text-xs text-zinc-500 mt-1">Медиа прямо в канал альбомами по 10, с подписью и хештегами. Без ссылки.</p>
+            </button>
+          </div>
+        </section>
 
         <section>
           <div className="flex items-center gap-2 mb-3">

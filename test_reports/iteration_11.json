@@ -1,0 +1,25 @@
+{
+  "summary": "Verified NEW FEATURE 'post type' (telegraph vs native) end-to-end. Backend: added /app/backend/tests/test_native_post.py (4 tests). Full suite: 79/79 passing (75 previous + 4 new). Native draft->upload->finalize produces status=ready, telegraph_url=null, cover_url set, photo_count/video_count correct (2p+1v -> pc=2, vc=1; 3p -> pc=3, vc=0). POST /api/posts/{id}/publish on a native post with NO channel returns 400 with Russian 'настройте канал' (does NOT 500). GET /api/posts/{id}/edit works on native (post_type='native', description without hashtag suffix, media list, no 'статья создаётся' error). PUT /api/posts/{id} on native updates title/description/hashtags/captions, removes media via KEEP-list, recomputes counts (video 1->0, photos 2 -> 2), does NOT set telegraph_url, and deletes removed GridFS file (pre 200 -> post 404). Frontend E2E through preview URL: login -> /new -> type selector renders both tiles (type-telegraph, type-native); toggle changes highlight and save button label ('Создать статью' <-> 'Создать пост'); selecting native + title + description + hashtag (#uitest) + cover + 2 photos + Save -> navigates to dashboard -> post finalizes to 'ГОТОВ', dashboard shows native-label-{id}='📎 альбом в канале' instead of link, photo-count=3, video-count=0, publish-{id} and edit-{id} buttons are enabled (disabled attr is null). Test post cleaned up via DELETE /api/posts/{id}?delete_media=true.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_native_post.py",
+    "/app/backend/tests/test_edit_remove.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py now 950 lines — post_type branches in publish_post/_finalize_post/edit_post further increase complexity; splitting into routers/services (posts, media, native, telegraph, settings) is overdue.",
+    "_finalize_native swallows auto-publish errors and only sets upd['error'] but keeps status='ready'; the user sees a ready post with no channel_message_ids and no visible failure hint in the dashboard row — consider surfacing 'error' text in the row.",
+    "_do_publish_native raises ValueError('Нет медиа для публикации'); publish_post wraps it as 400 'Ошибка публикации: ...' — user-visible message duplicates 'Ошибка публикации:' prefix. Consider re-raising with clean detail.",
+    "publish_post branching: for native, if telegram_api.send_media_group raises inside try, it falls into 'Ошибка публикации' 400 — fine, but no partial-cleanup if the first chunk sent then second failed (channel_message_ids not persisted). Consider persisting msg_ids incrementally.",
+    "server.py still uses deprecated @app.on_event('startup') (unchanged from previous iterations)."
+  ],
+  "updated_files": ["/app/backend/tests/test_native_post.py"],
+  "success_rate": {"backend": "100% (79/79)", "frontend": "100% (native type selector + create + dashboard label + counts + publish/edit enabled all verified on preview URL)"},
+  "test_credentials": "admin@mediabot.local / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "During this run: 4 backend TEST_ native posts (self-cleaned in fixtures) + 1 frontend TEST_ native UI post (deleted at end of E2E script). No residual TEST_/SMOKE_ posts.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "test_native_post.py covers: (1) create native draft with photos+video, upload PNG+MP4 via /posts/{id}/media/{slot}, poll until status=ready, assert telegraph_url null + cover_url set + counts; (2) publish w/o channel -> 400 with 'канал' in Russian detail; (3) GET /edit returns post_type='native' + description without hashtag suffix + media; (4) PUT with keep-list removes video, recomputes counts, verifies GridFS 404 on removed media_id, and asserts telegraph_url stays null. Real Telegram sendMediaGroup NOT tested (no bot token). Frontend E2E uses fetch() via page.evaluate for token-authorised API calls (urllib from test host got 403, probably preview edge auth; use page.evaluate fetch instead)."
+}

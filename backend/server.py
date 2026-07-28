@@ -68,6 +68,7 @@ class DraftIn(BaseModel):
     title: str
     description: Optional[str] = ""
     publish_after: bool = False
+    post_type: str = "telegraph"  # telegraph | native
     hashtags: List[str] = []
     media: List[MediaDesc] = []
 
@@ -272,6 +273,87 @@ async def _do_publish(post: dict, channel: dict):
     return (res or {}).get("message_id")
 
 
+def _native_caption(post: dict) -> str:
+    parts = [f"<b>{post['title']}</b>"]
+    blocks = post.get("blocks", [])
+    desc = next((b.get("value", "") for b in blocks if b.get("type") == "text"), "")
+    if desc:
+        parts += ["", desc]
+    if post.get("hashtags"):
+        parts += ["", " ".join(post["hashtags"])]
+    return "\n".join(parts)[:1024]
+
+
+async def _do_publish_native(post: dict, channel: dict):
+    """Публикует нативный пост — альбом(ы) прямо в канал (медиа по 10 в группе)."""
+    blocks = post.get("blocks", [])
+    _t, photos, videos, cover = _split_media(blocks)
+    items = photos + videos  # cover уже первым среди photos (см. _split_media)
+    if not items:
+        raise ValueError("Нет медиа для публикации")
+    caption = _native_caption(post)
+    chat_id = channel["channel_id"]
+    msg_ids = []
+    # разбиваем на альбомы по 10
+    chunks = [items[i:i + 10] for i in range(0, len(items), 10)]
+    for ci, chunk in enumerate(chunks):
+        if len(chunk) == 1:
+            b = chunk[0]
+            cap = caption if ci == 0 else ""
+            if b["type"] == "photo":
+                res = await telegram_api.send_photo(chat_id, b["url"], cap)
+            else:
+                res = await telegram_api.send_video(chat_id, b["url"], cap)
+            msg_ids.append(res.get("message_id"))
+        else:
+            media = []
+            for mi, b in enumerate(chunk):
+                item = {"type": "photo" if b["type"] == "photo" else "video", "media": b["url"]}
+                if ci == 0 and mi == 0 and caption:
+                    item["caption"] = caption
+                    item["parse_mode"] = "HTML"
+                media.append(item)
+            res = await telegram_api.send_media_group(chat_id, media)
+            msg_ids += [m.get("message_id") for m in res]
+    return msg_ids
+
+
+async def _finalize_native(post_id: str):
+    post = await db.posts.find_one({"id": post_id})
+    if not post or post.get("status") not in ("uploading", "processing"):
+        return
+    blocks = post.get("blocks", [])
+    _t, photos, videos, cover = _split_media(blocks)
+    media_ids = [b["media_id"] for b in blocks if b.get("media_id")]
+    upd = {
+        "telegraph_url": None,
+        "telegraph_path": None,
+        "photos_url": None,
+        "videos_url": None,
+        "cover_url": cover["url"] if cover else None,
+        "media_ids": media_ids,
+        "status": "ready",
+    }
+    published = False
+    channel_title = None
+    if post.get("publish_after"):
+        channel = await db.app_config.find_one({"_id": "channel"})
+        if channel:
+            try:
+                msg_ids = await _do_publish_native({**post, **upd}, channel)
+                published = True
+                channel_title = channel.get("channel_title")
+                upd["channel_message_ids"] = msg_ids
+                upd["channel_message_id"] = msg_ids[0] if msg_ids else None
+                upd["status"] = "published"
+            except Exception as e:
+                logger.warning("native auto-publish failed: %s", e)
+                upd["error"] = f"Публикация не удалась: {e}"
+    upd["published"] = published
+    upd["channel_title"] = channel_title
+    await db.posts.update_one({"id": post_id}, {"$set": upd})
+
+
 async def _store_bytes(content: bytes, ctype: str, kind: str, filename: str):
     ext = os.path.splitext(filename or "")[1] or (".mp4" if kind == "video" else ".jpg")
     if kind == "photo" and ctype == "image/jpeg":
@@ -322,6 +404,9 @@ async def _store_temp(path: str, ctype: str, kind: str, filename: str):
 async def _finalize_post(post_id: str):
     post = await db.posts.find_one({"id": post_id})
     if not post or post.get("status") not in ("uploading", "processing"):
+        return
+    if post.get("post_type") == "native":
+        await _finalize_native(post_id)
         return
     blocks = post.get("blocks", [])
     text_blocks, photos, videos, cover = _split_media(blocks)
@@ -427,6 +512,7 @@ async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
         "published": False,
         "channel_title": None,
         "channel_message_id": None,
+        "post_type": payload.post_type if payload.post_type in ("telegraph", "native") else "telegraph",
         "status": "uploading" if slots else "processing",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -506,19 +592,26 @@ async def publish_post(post_id: str, user=Depends(auth.get_current_user)):
     post = await db.posts.find_one({"id": post_id})
     if not post:
         raise HTTPException(status_code=404, detail="Пост не найден")
-    if not post.get("telegraph_url"):
-        raise HTTPException(status_code=400, detail="Статья ещё создаётся, подождите")
+    if post.get("status") in ("uploading", "processing", "failed"):
+        raise HTTPException(status_code=400, detail="Пост ещё создаётся, подождите")
     channel = await db.app_config.find_one({"_id": "channel"})
     if not channel:
         raise HTTPException(status_code=400, detail="Сначала настройте канал в настройках")
     try:
-        msg_id = await _do_publish(post, channel)
+        if post.get("post_type") == "native":
+            msg_ids = await _do_publish_native(post, channel)
+            set_fields = {"channel_message_ids": msg_ids, "channel_message_id": msg_ids[0] if msg_ids else None}
+        else:
+            if not post.get("telegraph_url"):
+                raise HTTPException(status_code=400, detail="Статья ещё создаётся, подождите")
+            msg_id = await _do_publish(post, channel)
+            set_fields = {"channel_message_id": msg_id}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка публикации: {e}")
-    await db.posts.update_one(
-        {"id": post_id},
-        {"$set": {"published": True, "status": "published", "channel_title": channel.get("channel_title"), "channel_message_id": msg_id}},
-    )
+    set_fields.update({"published": True, "status": "published", "channel_title": channel.get("channel_title")})
+    await db.posts.update_one({"id": post_id}, {"$set": set_fields})
     return {"status": "published", "channel_title": channel.get("channel_title")}
 
 
@@ -527,13 +620,16 @@ async def delete_post(post_id: str, delete_channel: bool = False, delete_media: 
     post = await db.posts.find_one({"id": post_id})
     if not post:
         raise HTTPException(status_code=404, detail="Пост не найден")
-    if delete_channel and post.get("channel_message_id"):
-        channel = await db.app_config.find_one({"_id": "channel"})
-        if channel:
-            try:
-                await telegram_api.delete_message(channel["channel_id"], post["channel_message_id"])
-            except Exception as e:
-                logger.warning("delete channel message failed: %s", e)
+    if delete_channel:
+        msg_ids = post.get("channel_message_ids") or ([post["channel_message_id"]] if post.get("channel_message_id") else [])
+        if msg_ids:
+            channel = await db.app_config.find_one({"_id": "channel"})
+            if channel:
+                for mid in msg_ids:
+                    try:
+                        await telegram_api.delete_message(channel["channel_id"], mid)
+                    except Exception as e:
+                        logger.warning("delete channel message failed: %s", e)
     if delete_media:
         bucket = get_gridfs()
         for mid in post.get("media_ids", []):
@@ -556,7 +652,7 @@ async def get_post_for_edit(post_id: str, user=Depends(auth.get_current_user)):
     post = await db.posts.find_one({"id": post_id})
     if not post:
         raise HTTPException(status_code=404, detail="Пост не найден")
-    if not post.get("telegraph_path"):
+    if post.get("post_type") != "native" and not post.get("telegraph_path"):
         raise HTTPException(status_code=400, detail="Статья ещё создаётся, редактирование недоступно")
     blocks = post.get("blocks", [])
     media = [
@@ -572,6 +668,7 @@ async def get_post_for_edit(post_id: str, user=Depends(auth.get_current_user)):
         "title": post["title"],
         "description": description,
         "hashtags": tags,
+        "post_type": post.get("post_type", "telegraph"),
         "telegraph_url": post.get("telegraph_url"),
         "media": media,
     }
@@ -584,7 +681,7 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
     post = await db.posts.find_one({"id": post_id})
     if not post:
         raise HTTPException(status_code=404, detail="Пост не найден")
-    if not post.get("telegraph_path"):
+    if post.get("post_type") != "native" and not post.get("telegraph_path"):
         raise HTTPException(status_code=400, detail="Статья ещё создаётся, редактирование недоступно")
     blocks = post.get("blocks", [])
     kept = {m.idx: m for m in payload.media}
@@ -618,6 +715,45 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
         blocks.insert(0, {"type": "text", "value": desc})
 
     text_blocks, photos, videos, cover = _split_media(blocks)
+    title = payload.title.strip()
+
+    async def _cleanup_removed():
+        if removed_media_ids or removed_r2_keys:
+            bucket = get_gridfs()
+            for mid in removed_media_ids:
+                try:
+                    await bucket.delete(ObjectId(mid))
+                except Exception:
+                    pass
+            if storage.r2_enabled():
+                for key in removed_r2_keys:
+                    try:
+                        await asyncio.to_thread(storage.delete_file, key)
+                    except Exception:
+                        logger.warning("R2 delete failed for key %s", key)
+
+    # Нативный пост — без Telegraph, только обновляем данные и чистим удалённые файлы
+    if post.get("post_type") == "native":
+        media_ids = [b["media_id"] for b in blocks if b.get("media_id")]
+        r2_keys = [b["r2_key"] for b in blocks if b.get("r2_key")]
+        await db.posts.update_one(
+            {"id": post_id},
+            {"$set": {
+                "title": title,
+                "blocks": blocks,
+                "hashtags": tags,
+                "cover_url": cover["url"] if cover else None,
+                "media_ids": media_ids,
+                "r2_keys": r2_keys,
+                "photo_count": len(photos),
+                "video_count": len(videos),
+                "media_count": len(photos) + len(videos),
+                "preview": desc[:200],
+            }},
+        )
+        await _cleanup_removed()
+        return {"status": "updated"}
+
     photos_url, photos_paths = post.get("photos_url"), post.get("photos_paths") or ([post["photos_path"]] if post.get("photos_path") else [])
     videos_url, videos_paths = post.get("videos_url"), post.get("videos_paths") or ([post["videos_path"]] if post.get("videos_path") else [])
     title = payload.title.strip()
@@ -672,19 +808,7 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
     )
 
     # Удаляем файлы убранных медиа с хостинга
-    if removed_media_ids or removed_r2_keys:
-        bucket = get_gridfs()
-        for mid in removed_media_ids:
-            try:
-                await bucket.delete(ObjectId(mid))
-            except Exception:
-                pass
-        if storage.r2_enabled():
-            for key in removed_r2_keys:
-                try:
-                    await asyncio.to_thread(storage.delete_file, key)
-                except Exception:
-                    logger.warning("R2 delete failed for key %s", key)
+    await _cleanup_removed()
 
     return {"status": "updated", "telegraph_url": photos_url or videos_url}
 
