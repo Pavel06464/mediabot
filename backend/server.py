@@ -79,11 +79,21 @@ class MediaEdit(BaseModel):
     is_cover: bool = False
 
 
+class NewMediaIn(BaseModel):
+    kind: str  # photo | video
+    url: str
+    media_id: Optional[str] = None
+    r2_key: Optional[str] = None
+    caption: Optional[str] = ""
+    is_cover: bool = False
+
+
 class PostEditIn(BaseModel):
     title: str
     description: Optional[str] = ""
     hashtags: List[str] = []
     media: List[MediaEdit] = []
+    new_media: List[NewMediaIn] = []
 
 
 def _normalize_tags(raw):
@@ -562,16 +572,8 @@ async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
     return {"id": post_id, "slots": slots}
 
 
-@api_router.post("/posts/{post_id}/media/{idx}")
-async def upload_media_slot(post_id: str, idx: int, file: UploadFile = File(...), user=Depends(auth.get_current_user)):
-    post = await db.posts.find_one({"id": post_id})
-    if not post:
-        raise HTTPException(status_code=404, detail="Пост не найден")
-    blocks = post.get("blocks", [])
-    if idx < 0 or idx >= len(blocks) or blocks[idx]["type"] not in ("photo", "video"):
-        raise HTTPException(status_code=400, detail="Неверный слот")
-
-    slot_kind = blocks[idx]["type"]
+async def _process_upload(file: UploadFile, expected_kind: str = None):
+    """Валидирует и сохраняет загруженный файл. Возвращает (kind, url, media_id, r2_key)."""
     ctype = file.content_type or "application/octet-stream"
     name = (file.filename or "").lower()
     file_kind = "video" if ctype.startswith("video") else ("photo" if ctype.startswith("image") else None)
@@ -580,11 +582,13 @@ async def upload_media_slot(post_id: str, idx: int, file: UploadFile = File(...)
             file_kind = "photo"
         elif name.endswith((".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg")):
             file_kind = "video"
-    if file_kind != slot_kind:
-        expected = "видео" if slot_kind == "video" else "изображение"
+    if file_kind is None:
+        raise HTTPException(status_code=400, detail=f"Неизвестный тип файла «{file.filename or ctype}»")
+    if expected_kind and file_kind != expected_kind:
+        expected = "видео" if expected_kind == "video" else "изображение"
         raise HTTPException(status_code=400, detail=f"Ожидается {expected}, а получен файл «{file.filename or ctype}»")
 
-    if slot_kind == "photo":
+    if file_kind == "photo":
         content = await file.read()
         if len(content) > 25 * 1024 * 1024:
             raise HTTPException(status_code=400, detail="Изображение больше 25 МБ")
@@ -603,6 +607,20 @@ async def upload_media_slot(post_id: str, idx: int, file: UploadFile = File(...)
             url, media_id, r2_key = await _store_temp(path, ctype, "video", file.filename or "")
         finally:
             os.unlink(path)
+    return file_kind, url, media_id, r2_key
+
+
+@api_router.post("/posts/{post_id}/media/{idx}")
+async def upload_media_slot(post_id: str, idx: int, file: UploadFile = File(...), user=Depends(auth.get_current_user)):
+    post = await db.posts.find_one({"id": post_id})
+    if not post:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    blocks = post.get("blocks", [])
+    if idx < 0 or idx >= len(blocks) or blocks[idx]["type"] not in ("photo", "video"):
+        raise HTTPException(status_code=400, detail="Неверный слот")
+
+    slot_kind = blocks[idx]["type"]
+    _kind, url, media_id, r2_key = await _process_upload(file, expected_kind=slot_kind)
 
     set_fields = {f"blocks.{idx}.url": url, f"blocks.{idx}.pending": False}
     if media_id:
@@ -625,6 +643,17 @@ async def upload_media_slot(post_id: str, idx: int, file: UploadFile = File(...)
             await _finalize_post(post_id)
     out = await db.posts.find_one({"id": post_id}, {"_id": 0, "blocks": 0})
     return out
+
+
+@api_router.post("/posts/{post_id}/media")
+async def upload_edit_media(post_id: str, file: UploadFile = File(...), user=Depends(auth.get_current_user)):
+    """Загружает новый файл при редактировании поста. Не привязывает к посту —
+    возвращает метаданные, которые фронтенд шлёт в PUT /posts/{id} (new_media)."""
+    post = await db.posts.find_one({"id": post_id}, {"_id": 1})
+    if not post:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    kind, url, media_id, r2_key = await _process_upload(file)
+    return {"kind": kind, "url": url, "media_id": media_id, "r2_key": r2_key}
 
 
 @api_router.post("/posts/{post_id}/publish")
@@ -743,6 +772,20 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
             new_blocks.append(b)
     blocks = new_blocks
 
+    # Добавляем новые медиа (загружены заранее через POST /posts/{id}/media)
+    for nm in payload.new_media:
+        if nm.kind not in ("photo", "video") or not nm.url:
+            continue
+        blocks.append({
+            "type": nm.kind,
+            "is_cover": bool(nm.is_cover),
+            "caption": nm.caption or "",
+            "url": nm.url,
+            "media_id": nm.media_id,
+            "r2_key": nm.r2_key,
+            "pending": False,
+        })
+
     tags = _normalize_tags(payload.hashtags)
     desc = (payload.description or "").strip()
     text_idx = next((i for i, b in enumerate(blocks) if b["type"] == "text"), None)
@@ -799,20 +842,25 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
     title = payload.title.strip()
     try:
         if photos_paths or videos_paths:
-            if photos_paths:
-                pcontent = text_blocks + photos
-                vcontent = videos
-                if pcontent:
+            # Текст идёт в фото-статью, если фото есть; иначе — в видео-статью.
+            pcontent = (text_blocks + photos) if photos else []
+            vcontent = (videos if photos else text_blocks + videos) if videos else []
+            # Фото-статья: правим существующую или создаём новую (если фото добавили впервые).
+            if photos:
+                if photos_paths:
                     photos_url, photos_paths = await edit_paginated_page(photos_paths, title, pcontent, BASE_URL)
                 else:
-                    photos_url, photos_paths = None, []
+                    photos_url, photos_paths = await create_paginated_page(title, pcontent, BASE_URL)
             else:
-                vcontent = text_blocks + videos
-            if videos_paths:
-                if vcontent:
+                photos_url, photos_paths = None, []
+            # Видео-статья: аналогично.
+            if videos:
+                if videos_paths:
                     videos_url, videos_paths = await edit_paginated_page(videos_paths, title, vcontent, BASE_URL, max_items=10)
                 else:
-                    videos_url, videos_paths = None, []
+                    videos_url, videos_paths = await create_paginated_page(title, vcontent, BASE_URL, max_items=10)
+            else:
+                videos_url, videos_paths = None, []
         else:
             # Легаси-пост с единственной статьёй
             ordered = ([cover] + [b for b in blocks if b is not cover]) if cover else blocks

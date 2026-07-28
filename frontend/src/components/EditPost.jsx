@@ -1,13 +1,42 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, Star, Save, ExternalLink, Trash2 } from "lucide-react";
+import { ArrowLeft, Star, Save, ExternalLink, Trash2, UploadCloud, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import api from "@/lib/api";
 import { MarkdownToolbar } from "@/components/MarkdownToolbar";
 import { HashtagsInput } from "@/components/HashtagsInput";
+
+let nc = 0;
+const nid = () => `n${++nc}`;
+
+function Dropzone({ accept, onFiles, children, testid, inputTestid }) {
+  const [drag, setDrag] = useState(false);
+  const ref = useRef(null);
+  const handle = (list) => {
+    const files = Array.from(list || []);
+    const isVid = accept === "video/*";
+    const valid = files.filter((f) => f.type.startsWith(isVid ? "video/" : "image/"));
+    if (!valid.length) return toast.error(isVid ? "Перетащите видео" : "Перетащите изображение");
+    onFiles(valid);
+  };
+  return (
+    <div
+      data-testid={testid}
+      onClick={() => ref.current?.click()}
+      onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+      onDragLeave={() => setDrag(false)}
+      onDrop={(e) => { e.preventDefault(); setDrag(false); handle(e.dataTransfer.files); }}
+      className={`cursor-pointer border-2 border-dashed p-6 text-center transition-colors duration-150 ${drag ? "border-[#0055FF] bg-blue-50" : "border-zinc-300 bg-zinc-50 hover:border-zinc-400"}`}
+    >
+      <input ref={ref} type="file" accept={accept} multiple hidden data-testid={inputTestid}
+        onChange={(e) => { handle(e.target.files); e.target.value = ""; }} />
+      {children}
+    </div>
+  );
+}
 
 export default function EditPost() {
   const navigate = useNavigate();
@@ -19,6 +48,7 @@ export default function EditPost() {
   const [description, setDescription] = useState("");
   const [hashtags, setHashtags] = useState([]);
   const [media, setMedia] = useState([]);
+  const [newMedia, setNewMedia] = useState([]); // {tempId, kind, localUrl, uploading, url, media_id, r2_key, caption}
   const [link, setLink] = useState(null);
 
   useEffect(() => {
@@ -46,8 +76,34 @@ export default function EditPost() {
   const removeMedia = (idx) =>
     setMedia((prev) => prev.filter((m) => m.idx !== idx));
 
+  const uploadNew = useCallback((files, kind) => {
+    files.forEach((file) => {
+      const tempId = nid();
+      const localUrl = URL.createObjectURL(file);
+      setNewMedia((prev) => [...prev, { tempId, kind, localUrl, uploading: true, caption: "" }]);
+      const form = new FormData();
+      form.append("file", file);
+      api.post(`/posts/${id}/media`, form)
+        .then(({ data }) => {
+          setNewMedia((prev) => prev.map((m) => m.tempId === tempId
+            ? { ...m, uploading: false, url: data.url, media_id: data.media_id, r2_key: data.r2_key }
+            : m));
+        })
+        .catch((e) => {
+          toast.error(e.response?.data?.detail || "Ошибка загрузки файла");
+          setNewMedia((prev) => prev.filter((m) => m.tempId !== tempId));
+        });
+    });
+  }, [id]);
+
+  const updNewCaption = (tempId, caption) =>
+    setNewMedia((prev) => prev.map((m) => (m.tempId === tempId ? { ...m, caption } : m)));
+  const removeNew = (tempId) =>
+    setNewMedia((prev) => prev.filter((m) => m.tempId !== tempId));
+
   const save = async () => {
     if (!title.trim()) return toast.error("Укажите заголовок");
+    if (newMedia.some((m) => m.uploading)) return toast.error("Дождитесь загрузки новых файлов");
     setSaving(true);
     try {
       await api.put(`/posts/${id}`, {
@@ -55,8 +111,11 @@ export default function EditPost() {
         description: description.trim(),
         hashtags,
         media: media.map((m) => ({ idx: m.idx, caption: m.caption || "", is_cover: !!m.is_cover })),
+        new_media: newMedia.filter((m) => m.url).map((m) => ({
+          kind: m.kind, url: m.url, media_id: m.media_id, r2_key: m.r2_key, caption: m.caption || "", is_cover: false,
+        })),
       });
-      toast.success("Статья обновлена");
+      toast.success("Пост обновлён");
       navigate("/");
     } catch (e) {
       toast.error(e.response?.data?.detail || "Ошибка сохранения");
@@ -66,6 +125,9 @@ export default function EditPost() {
   };
 
   if (loading) return <div className="min-h-screen flex items-center justify-center text-zinc-400">Загрузка...</div>;
+
+  const newPhotos = newMedia.filter((m) => m.kind === "photo");
+  const newVideos = newMedia.filter((m) => m.kind === "video");
 
   return (
     <div className="min-h-screen bg-[#F9FAFB]">
@@ -134,6 +196,60 @@ export default function EditPost() {
             <p className="text-xs text-zinc-400 mt-3">Удалённые медиа исчезнут из статьи и с хостинга после сохранения.</p>
           </section>
         )}
+
+        <section>
+          <h2 className="text-lg font-bold tracking-tight mb-3">Добавить фотографии</h2>
+          {newPhotos.length > 0 && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
+              {newPhotos.map((m) => (
+                <div key={m.tempId} className="relative bg-white border border-zinc-200 p-1.5" data-testid={`new-photo-${m.tempId}`}>
+                  <img src={m.localUrl} alt="" className="h-28 w-full object-cover bg-zinc-50" />
+                  {m.uploading && (
+                    <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                      <Loader2 className="h-6 w-6 text-white animate-spin" />
+                    </div>
+                  )}
+                  <button onClick={() => removeNew(m.tempId)} className="absolute top-2 right-2 bg-white border border-zinc-200 p-1 text-zinc-500 hover:text-[#FF3333]" data-testid={`new-photo-remove-${m.tempId}`}>
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                  <Input value={m.caption} onChange={(e) => updNewCaption(m.tempId, e.target.value)} placeholder="Подпись" className="rounded-none mt-1.5 text-xs h-8" />
+                </div>
+              ))}
+            </div>
+          )}
+          <Dropzone accept="image/*" onFiles={(f) => uploadNew(f, "photo")} testid="edit-photos-dropzone" inputTestid="edit-photos-input">
+            <UploadCloud className="h-6 w-6 text-zinc-400 mx-auto mb-2" />
+            <p className="text-sm text-zinc-600 font-medium">Перетащите фотографии сюда или нажмите</p>
+            <p className="text-xs text-zinc-400 mt-1">можно несколько сразу</p>
+          </Dropzone>
+        </section>
+
+        <section>
+          <h2 className="text-lg font-bold tracking-tight mb-3">Добавить видео</h2>
+          {newVideos.length > 0 && (
+            <div className="space-y-3 mb-3">
+              {newVideos.map((m) => (
+                <div key={m.tempId} className="relative bg-white border border-zinc-200 p-2" data-testid={`new-video-${m.tempId}`}>
+                  <video src={m.localUrl} controls className="max-h-56 w-full bg-black" />
+                  {m.uploading && (
+                    <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
+                      <Loader2 className="h-7 w-7 text-white animate-spin" />
+                    </div>
+                  )}
+                  <button onClick={() => removeNew(m.tempId)} className="absolute top-3 right-3 bg-white border border-zinc-200 p-1.5 text-zinc-500 hover:text-[#FF3333]" data-testid={`new-video-remove-${m.tempId}`}>
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                  <Input value={m.caption} onChange={(e) => updNewCaption(m.tempId, e.target.value)} placeholder="Подпись" className="rounded-none mt-2 text-sm" />
+                </div>
+              ))}
+            </div>
+          )}
+          <Dropzone accept="video/*" onFiles={(f) => uploadNew(f, "video")} testid="edit-videos-dropzone" inputTestid="edit-videos-input">
+            <UploadCloud className="h-6 w-6 text-zinc-400 mx-auto mb-2" />
+            <p className="text-sm text-zinc-600 font-medium">Перетащите видео сюда или нажмите</p>
+            <p className="text-xs text-zinc-400 mt-1">можно несколько сразу</p>
+          </Dropzone>
+        </section>
       </main>
     </div>
   );
