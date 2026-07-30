@@ -111,6 +111,7 @@ class QueueOrderIn(BaseModel):
 class SchedulerIn(BaseModel):
     enabled: bool = False
     interval_minutes: int = 60
+    auto_enqueue: bool = False
 
 
 def _normalize_tags(raw):
@@ -440,6 +441,20 @@ async def _finalize_native(post_id: str):
     upd["published"] = published
     upd["channel_title"] = channel_title
     await db.posts.update_one({"id": post_id}, {"$set": upd})
+    await _maybe_auto_enqueue(post_id)
+
+
+async def _maybe_auto_enqueue(post_id: str):
+    """Если включена авто-постановка в очередь — добавляет готовый неопубликованный пост в очередь."""
+    sched = await db.app_config.find_one({"_id": "scheduler"})
+    if not (sched and sched.get("auto_enqueue")):
+        return
+    post = await db.posts.find_one({"id": post_id}, {"status": 1, "published": 1, "in_queue": 1, "scheduled_at": 1})
+    if not post or post.get("status") != "ready" or post.get("published") or post.get("in_queue") or post.get("scheduled_at"):
+        return
+    last = await db.posts.find_one({"in_queue": True}, sort=[("queue_order", -1)], projection={"queue_order": 1})
+    order = (last.get("queue_order") or 0) + 1 if last else 1
+    await db.posts.update_one({"id": post_id}, {"$set": {"in_queue": True, "queue_order": order}})
 
 
 async def _store_bytes(content: bytes, ctype: str, kind: str, filename: str):
@@ -553,6 +568,7 @@ async def _finalize_post(post_id: str):
     upd["published"] = published
     upd["channel_title"] = channel_title
     await db.posts.update_one({"id": post_id}, {"$set": upd})
+    await _maybe_auto_enqueue(post_id)
 
 
 @api_router.post("/posts/draft")
@@ -807,7 +823,8 @@ async def queue_post(post_id: str, payload: QueueIn, user=Depends(auth.get_curre
 
 @api_router.get("/settings/scheduler")
 async def get_scheduler(user=Depends(auth.get_current_user)):
-    cfg = await db.app_config.find_one({"_id": "scheduler"}, {"_id": 0}) or {"enabled": False, "interval_minutes": 60, "next_run_at": None}
+    cfg = await db.app_config.find_one({"_id": "scheduler"}, {"_id": 0}) or {"enabled": False, "interval_minutes": 60, "next_run_at": None, "auto_enqueue": False}
+    cfg.setdefault("auto_enqueue", False)
     queue = await db.posts.find(
         {"in_queue": True, "published": {"$ne": True}},
         {"_id": 0, "id": 1, "title": 1, "status": 1, "queue_order": 1, "photo_count": 1, "video_count": 1, "cover_url": 1},
@@ -818,7 +835,7 @@ async def get_scheduler(user=Depends(auth.get_current_user)):
 @api_router.put("/settings/scheduler")
 async def set_scheduler(payload: SchedulerIn, user=Depends(auth.get_current_user)):
     interval = max(1, int(payload.interval_minutes))
-    upd = {"enabled": bool(payload.enabled), "interval_minutes": interval}
+    upd = {"enabled": bool(payload.enabled), "interval_minutes": interval, "auto_enqueue": bool(payload.auto_enqueue)}
     if payload.enabled:
         upd["next_run_at"] = (datetime.now(timezone.utc) + timedelta(minutes=interval)).isoformat()
     else:

@@ -29,14 +29,14 @@ const fmtUTC = (iso) => {
 };
 
 export default function SchedulerSettings({ open, onOpenChange, onChange }) {
-  const [cfg, setCfg] = useState({ enabled: false, interval_minutes: 60, next_run_at: null });
+  const [cfg, setCfg] = useState({ enabled: false, interval_minutes: 60, next_run_at: null, auto_enqueue: false });
   const [queue, setQueue] = useState([]);
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const { data } = await api.get("/settings/scheduler");
-      setCfg({ enabled: data.enabled, interval_minutes: data.interval_minutes, next_run_at: data.next_run_at });
+      setCfg({ enabled: data.enabled, interval_minutes: data.interval_minutes, next_run_at: data.next_run_at, auto_enqueue: !!data.auto_enqueue });
       setQueue(data.queue || []);
     } catch { /* ignore */ }
   }, []);
@@ -46,8 +46,10 @@ export default function SchedulerSettings({ open, onOpenChange, onChange }) {
   const persist = async (next) => {
     setSaving(true);
     try {
-      const { data } = await api.put("/settings/scheduler", { enabled: next.enabled, interval_minutes: next.interval_minutes });
-      setCfg({ enabled: data.enabled, interval_minutes: data.interval_minutes, next_run_at: data.next_run_at });
+      const { data } = await api.put("/settings/scheduler", {
+        enabled: next.enabled, interval_minutes: next.interval_minutes, auto_enqueue: next.auto_enqueue,
+      });
+      setCfg({ enabled: data.enabled, interval_minutes: data.interval_minutes, next_run_at: data.next_run_at, auto_enqueue: !!data.auto_enqueue });
       onChange?.();
     } catch {
       toast.error("Не удалось сохранить настройки");
@@ -56,8 +58,9 @@ export default function SchedulerSettings({ open, onOpenChange, onChange }) {
     }
   };
 
-  const toggleEnabled = (v) => persist({ enabled: v, interval_minutes: cfg.interval_minutes });
-  const changeInterval = (v) => persist({ enabled: cfg.enabled, interval_minutes: Number(v) });
+  const toggleEnabled = (v) => persist({ ...cfg, enabled: v });
+  const changeInterval = (v) => persist({ ...cfg, interval_minutes: Number(v) });
+  const toggleAutoEnqueue = (v) => persist({ ...cfg, auto_enqueue: v });
 
   const removeFromQueue = async (id) => {
     try {
@@ -114,6 +117,14 @@ export default function SchedulerSettings({ open, onOpenChange, onChange }) {
             >
               {INTERVALS.map((i) => <option key={i.v} value={i.v}>{i.label}</option>)}
             </select>
+          </div>
+
+          <div className="flex items-center justify-between border border-zinc-200 p-4">
+            <div>
+              <div className="font-semibold text-sm">Авто-постановка в очередь</div>
+              <div className="text-xs text-zinc-400 mt-0.5">Новые готовые посты (без публикации) сами попадают в очередь</div>
+            </div>
+            <Switch checked={cfg.auto_enqueue} onCheckedChange={toggleAutoEnqueue} disabled={saving} data-testid="auto-enqueue-toggle" />
           </div>
 
           <div>
