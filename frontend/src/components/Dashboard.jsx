@@ -23,6 +23,9 @@ import {
   ChevronRight,
   Search,
   AlertTriangle,
+  CalendarClock,
+  Clock,
+  ListPlus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -48,12 +51,22 @@ import { useAuth } from "@/context/AuthContext";
 import { useUpload } from "@/context/UploadContext";
 import ChannelSettings from "@/components/ChannelSettings";
 import WatermarkSettings from "@/components/WatermarkSettings";
+import SchedulerSettings from "@/components/SchedulerSettings";
 
 const fmtDate = (iso) => {
   try {
     return new Date(iso).toLocaleString("ru-RU", {
       day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit",
     });
+  } catch { return iso; }
+};
+
+const fmtUTC = (iso) => {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toLocaleString("ru-RU", {
+      timeZone: "UTC", day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+    }) + " UTC";
   } catch { return iso; }
 };
 
@@ -100,6 +113,10 @@ export default function Dashboard() {
   const [publishing, setPublishing] = useState(null);
   const [channelOpen, setChannelOpen] = useState(false);
   const [watermarkOpen, setWatermarkOpen] = useState(false);
+  const [schedulerOpen, setSchedulerOpen] = useState(false);
+  const [scheduleTarget, setScheduleTarget] = useState(null);
+  const [scheduleValue, setScheduleValue] = useState("");
+  const [scheduleSaving, setScheduleSaving] = useState(false);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [qInput, setQInput] = useState("");
@@ -178,10 +195,103 @@ export default function Dashboard() {
     }
   };
 
+  const openSchedule = (post) => {
+    setScheduleTarget(post);
+    if (post.scheduled_at) {
+      try {
+        const d = new Date(post.scheduled_at);
+        const pad = (n) => String(n).padStart(2, "0");
+        setScheduleValue(`${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`);
+      } catch { setScheduleValue(""); }
+    } else {
+      setScheduleValue("");
+    }
+  };
+
+  const saveSchedule = async () => {
+    if (!scheduleTarget) return;
+    if (!scheduleValue) return toast.error("Укажите дату и время");
+    setScheduleSaving(true);
+    try {
+      await api.post(`/posts/${scheduleTarget.id}/schedule`, { scheduled_at: scheduleValue });
+      toast.success("Пост запланирован");
+      setScheduleTarget(null);
+      load();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Ошибка планирования");
+    } finally {
+      setScheduleSaving(false);
+    }
+  };
+
+  const clearSchedule = async () => {
+    if (!scheduleTarget) return;
+    setScheduleSaving(true);
+    try {
+      await api.post(`/posts/${scheduleTarget.id}/schedule`, { scheduled_at: null });
+      toast.success("Расписание снято");
+      setScheduleTarget(null);
+      load();
+    } catch {
+      toast.error("Ошибка");
+    } finally {
+      setScheduleSaving(false);
+    }
+  };
+
+  const toggleQueue = async (post) => {
+    try {
+      const next = !post.in_queue;
+      await api.post(`/posts/${post.id}/queue`, { in_queue: next });
+      toast.success(next ? "Добавлено в очередь" : "Убрано из очереди");
+      load();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Ошибка");
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#F9FAFB]">
       <ChannelSettings open={channelOpen} onOpenChange={setChannelOpen} onChange={load} />
       <WatermarkSettings open={watermarkOpen} onOpenChange={setWatermarkOpen} />
+      <SchedulerSettings open={schedulerOpen} onOpenChange={setSchedulerOpen} onChange={load} />
+
+      <Dialog open={!!scheduleTarget} onOpenChange={(o) => !o && setScheduleTarget(null)}>
+        <DialogContent className="rounded-none sm:max-w-md" data-testid="schedule-dialog">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <CalendarClock className="h-5 w-5 text-[#0055FF]" /> Отложенная публикация
+            </DialogTitle>
+            <DialogDescription>
+              «{scheduleTarget?.title}» уйдёт в канал в указанное время (по UTC).
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-2 space-y-2">
+            <label className="label-caps text-zinc-500 block">Дата и время (UTC)</label>
+            <input
+              type="datetime-local"
+              value={scheduleValue}
+              onChange={(e) => setScheduleValue(e.target.value)}
+              className="w-full border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-[#0055FF]"
+              data-testid="schedule-input"
+            />
+            {scheduleTarget?.scheduled_at && (
+              <p className="text-xs text-zinc-400">Сейчас запланировано на {fmtUTC(scheduleTarget.scheduled_at)}</p>
+            )}
+          </div>
+          <DialogFooter className="gap-2">
+            {scheduleTarget?.scheduled_at && (
+              <Button variant="outline" onClick={clearSchedule} disabled={scheduleSaving} className="rounded-none border-zinc-200 mr-auto" data-testid="schedule-clear">
+                Снять расписание
+              </Button>
+            )}
+            <Button variant="outline" onClick={() => setScheduleTarget(null)} className="rounded-none border-zinc-200" data-testid="schedule-cancel">Отмена</Button>
+            <Button onClick={saveSchedule} disabled={scheduleSaving} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="schedule-save">
+              {scheduleSaving ? "Сохраняю…" : "Запланировать"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!deleteTarget} onOpenChange={(o) => !o && setDeleteTarget(null)}>
         <DialogContent className="rounded-none sm:max-w-md" data-testid="delete-dialog">
@@ -230,6 +340,9 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <Button onClick={() => setSchedulerOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="scheduler-settings-btn">
+              <CalendarClock className="h-4 w-4 mr-2" /> Планировщик
+            </Button>
             <Button onClick={() => setWatermarkOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="watermark-settings-btn">
               <Droplets className="h-4 w-4 mr-2" /> Знак
             </Button>
@@ -418,9 +531,21 @@ export default function Dashboard() {
                         const st = p.published ? "published" : (p.status || "ready");
                         const m = STATUS_META[st] || STATUS_META.ready;
                         return (
-                          <Badge variant="outline" className={`rounded-none font-bold ${m.cls}`} data-testid={`status-${p.id}`}>
-                            {m.label}
-                          </Badge>
+                          <div className="flex flex-col gap-1 items-start">
+                            <Badge variant="outline" className={`rounded-none font-bold ${m.cls}`} data-testid={`status-${p.id}`}>
+                              {m.label}
+                            </Badge>
+                            {!p.published && p.scheduled_at && (
+                              <span className="text-[11px] text-[#0055FF] flex items-center gap-1 whitespace-nowrap" data-testid={`scheduled-badge-${p.id}`}>
+                                <CalendarClock className="h-3 w-3" /> {fmtUTC(p.scheduled_at)}
+                              </span>
+                            )}
+                            {!p.published && !p.scheduled_at && p.in_queue && (
+                              <span className="text-[11px] text-amber-600 flex items-center gap-1 whitespace-nowrap" data-testid={`queued-badge-${p.id}`}>
+                                <ListPlus className="h-3 w-3" /> в очереди
+                              </span>
+                            )}
+                          </div>
                         );
                       })()}
                     </TableCell>
@@ -429,6 +554,12 @@ export default function Dashboard() {
                         <Button onClick={() => publish(p.id)} disabled={publishing === p.id || !(p.status === "ready" || p.status === "published")} size="sm" className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white h-8 disabled:opacity-40" data-testid={`publish-${p.id}`}>
                           <Send className="h-3.5 w-3.5 mr-1.5" /> {p.published ? "Ещё раз" : "Опубликовать"}
                         </Button>
+                        <button onClick={() => openSchedule(p)} disabled={!(p.status === "ready" || p.status === "published")} className={`p-2 disabled:opacity-30 ${p.scheduled_at ? "text-[#0055FF]" : "text-zinc-400 hover:text-[#0055FF]"}`} title="Отложенная публикация" data-testid={`schedule-${p.id}`}>
+                          <CalendarClock className="h-4 w-4" />
+                        </button>
+                        <button onClick={() => toggleQueue(p)} disabled={!(p.status === "ready" || p.status === "published")} className={`p-2 disabled:opacity-30 ${p.in_queue ? "text-amber-600" : "text-zinc-400 hover:text-amber-600"}`} title={p.in_queue ? "Убрать из очереди" : "Добавить в очередь"} data-testid={`queue-${p.id}`}>
+                          <ListPlus className="h-4 w-4" />
+                        </button>
                         <button onClick={() => navigate(`/edit/${p.id}`)} disabled={!(p.status === "ready" || p.status === "published")} className="p-2 text-zinc-400 hover:text-[#0055FF] disabled:opacity-30 disabled:hover:text-zinc-400" title="Редактировать" data-testid={`edit-${p.id}`}>
                           <Pencil className="h-4 w-4" />
                         </button>

@@ -4,7 +4,7 @@ import uuid
 import asyncio
 import tempfile
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 
 from dotenv import load_dotenv
@@ -94,6 +94,23 @@ class PostEditIn(BaseModel):
     hashtags: List[str] = []
     media: List[MediaEdit] = []
     new_media: List[NewMediaIn] = []
+
+
+class ScheduleIn(BaseModel):
+    scheduled_at: Optional[str] = None  # ISO datetime (интерпретируется как UTC)
+
+
+class QueueIn(BaseModel):
+    in_queue: bool = True
+
+
+class QueueOrderIn(BaseModel):
+    order: List[str] = []  # ids постов в нужном порядке
+
+
+class SchedulerIn(BaseModel):
+    enabled: bool = False
+    interval_minutes: int = 60
 
 
 def _normalize_tags(raw):
@@ -585,6 +602,9 @@ async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
         "channel_message_id": None,
         "post_type": payload.post_type if payload.post_type in ("telegraph", "native") else "telegraph",
         "status": "uploading" if slots else "processing",
+        "scheduled_at": None,
+        "in_queue": False,
+        "queue_order": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.posts.insert_one(doc)
@@ -677,6 +697,36 @@ async def upload_edit_media(post_id: str, file: UploadFile = File(...), user=Dep
     return {"kind": kind, "url": url, "media_id": media_id, "r2_key": r2_key}
 
 
+async def _publish_and_store(post: dict) -> dict:
+    """Публикует готовый пост (native/telegraph) и сохраняет результат в БД.
+
+    Бросает ValueError при проблемах. Возвращает channel_title.
+    """
+    if post.get("status") in ("uploading", "processing", "failed"):
+        raise ValueError("Пост ещё создаётся")
+    channel = await db.app_config.find_one({"_id": "channel"})
+    if not channel:
+        raise ValueError("Канал не настроен")
+    if post.get("post_type") == "native":
+        msg_ids = await _do_publish_native(post, channel)
+        set_fields = {"channel_message_ids": msg_ids, "channel_message_id": msg_ids[0] if msg_ids else None}
+    else:
+        if not post.get("telegraph_url"):
+            raise ValueError("Статья ещё создаётся")
+        msg_id = await _do_publish(post, channel)
+        set_fields = {"channel_message_id": msg_id}
+    set_fields.update({
+        "published": True,
+        "status": "published",
+        "channel_title": channel.get("channel_title"),
+        "scheduled_at": None,
+        "in_queue": False,
+        "error": None,
+    })
+    await db.posts.update_one({"id": post["id"]}, {"$set": set_fields})
+    return channel.get("channel_title")
+
+
 @api_router.post("/posts/{post_id}/publish")
 async def publish_post(post_id: str, user=Depends(auth.get_current_user)):
     post = await db.posts.find_one({"id": post_id})
@@ -688,21 +738,100 @@ async def publish_post(post_id: str, user=Depends(auth.get_current_user)):
     if not channel:
         raise HTTPException(status_code=400, detail="Сначала настройте канал в настройках")
     try:
-        if post.get("post_type") == "native":
-            msg_ids = await _do_publish_native(post, channel)
-            set_fields = {"channel_message_ids": msg_ids, "channel_message_id": msg_ids[0] if msg_ids else None}
-        else:
-            if not post.get("telegraph_url"):
-                raise HTTPException(status_code=400, detail="Статья ещё создаётся, подождите")
-            msg_id = await _do_publish(post, channel)
-            set_fields = {"channel_message_id": msg_id}
-    except HTTPException:
-        raise
+        channel_title = await _publish_and_store(post)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка публикации: {e}")
-    set_fields.update({"published": True, "status": "published", "channel_title": channel.get("channel_title")})
-    await db.posts.update_one({"id": post_id}, {"$set": set_fields})
-    return {"status": "published", "channel_title": channel.get("channel_title")}
+    return {"status": "published", "channel_title": channel_title}
+
+
+def _parse_scheduled(s: str) -> str:
+    """Парсит входящую дату-время (ISO, UTC) → нормализованный UTC isoformat. Бросает ValueError."""
+    from datetime import datetime as _dt
+    raw = (s or "").strip()
+    if not raw:
+        raise ValueError("Не указано время")
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        dt = _dt.fromisoformat(raw)
+    except Exception:
+        raise ValueError("Неверный формат даты-времени")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    return dt.isoformat()
+
+
+@api_router.post("/posts/{post_id}/schedule")
+async def schedule_post(post_id: str, payload: ScheduleIn, user=Depends(auth.get_current_user)):
+    post = await db.posts.find_one({"id": post_id}, {"status": 1, "published": 1})
+    if not post:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    if post.get("status") not in ("ready", "published"):
+        raise HTTPException(status_code=400, detail="Пост ещё создаётся")
+    if not payload.scheduled_at:
+        # снять расписание
+        await db.posts.update_one({"id": post_id}, {"$set": {"scheduled_at": None}})
+        return {"status": "unscheduled"}
+    try:
+        iso = _parse_scheduled(payload.scheduled_at)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await db.posts.update_one(
+        {"id": post_id},
+        {"$set": {"scheduled_at": iso, "in_queue": False, "published": False, "status": "ready"}},
+    )
+    return {"status": "scheduled", "scheduled_at": iso}
+
+
+@api_router.post("/posts/{post_id}/queue")
+async def queue_post(post_id: str, payload: QueueIn, user=Depends(auth.get_current_user)):
+    post = await db.posts.find_one({"id": post_id}, {"status": 1})
+    if not post:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    if post.get("status") not in ("ready", "published"):
+        raise HTTPException(status_code=400, detail="Пост ещё создаётся")
+    if payload.in_queue:
+        last = await db.posts.find_one({"in_queue": True}, sort=[("queue_order", -1)], projection={"queue_order": 1})
+        order = (last.get("queue_order") or 0) + 1 if last else 1
+        await db.posts.update_one(
+            {"id": post_id},
+            {"$set": {"in_queue": True, "queue_order": order, "scheduled_at": None, "published": False, "status": "ready"}},
+        )
+    else:
+        await db.posts.update_one({"id": post_id}, {"$set": {"in_queue": False, "queue_order": None}})
+    return {"status": "ok", "in_queue": payload.in_queue}
+
+
+@api_router.get("/settings/scheduler")
+async def get_scheduler(user=Depends(auth.get_current_user)):
+    cfg = await db.app_config.find_one({"_id": "scheduler"}, {"_id": 0}) or {"enabled": False, "interval_minutes": 60, "next_run_at": None}
+    queue = await db.posts.find(
+        {"in_queue": True, "published": {"$ne": True}},
+        {"_id": 0, "id": 1, "title": 1, "status": 1, "queue_order": 1, "photo_count": 1, "video_count": 1, "cover_url": 1},
+    ).sort("queue_order", 1).to_list(500)
+    return {**cfg, "queue": queue, "queue_count": len(queue)}
+
+
+@api_router.put("/settings/scheduler")
+async def set_scheduler(payload: SchedulerIn, user=Depends(auth.get_current_user)):
+    interval = max(1, int(payload.interval_minutes))
+    upd = {"enabled": bool(payload.enabled), "interval_minutes": interval}
+    if payload.enabled:
+        upd["next_run_at"] = (datetime.now(timezone.utc) + timedelta(minutes=interval)).isoformat()
+    else:
+        upd["next_run_at"] = None
+    await db.app_config.update_one({"_id": "scheduler"}, {"$set": upd}, upsert=True)
+    return upd
+
+
+@api_router.put("/settings/scheduler/queue")
+async def reorder_queue(payload: QueueOrderIn, user=Depends(auth.get_current_user)):
+    for i, pid in enumerate(payload.order):
+        await db.posts.update_one({"id": pid, "in_queue": True}, {"$set": {"queue_order": i + 1}})
+    return {"status": "ok"}
 
 
 @api_router.delete("/posts/{post_id}")
@@ -1047,9 +1176,63 @@ app.add_middleware(
 )
 
 
+async def _scheduler_tick():
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    channel = await db.app_config.find_one({"_id": "channel"})
+    if not channel:
+        return  # без канала публиковать некуда
+
+    # (A) Посты с точным временем публикации, срок которых наступил.
+    due = await db.posts.find({
+        "scheduled_at": {"$ne": None, "$lte": now_iso},
+        "status": "ready",
+        "published": {"$ne": True},
+    }).to_list(50)
+    for post in due:
+        try:
+            await _publish_and_store(post)
+            logger.info("scheduled published %s", post["id"])
+        except Exception as e:
+            logger.warning("scheduled publish failed %s: %s", post.get("id"), e)
+            await db.posts.update_one({"id": post["id"]}, {"$set": {"scheduled_at": None, "error": f"Отложенная публикация не удалась: {e}"}})
+
+    # (B) Очередь-«капельница»: один пост за интервал.
+    sched = await db.app_config.find_one({"_id": "scheduler"})
+    if sched and sched.get("enabled"):
+        next_run = sched.get("next_run_at")
+        if not next_run or now_iso >= next_run:
+            interval = max(1, int(sched.get("interval_minutes") or 60))
+            post = await db.posts.find_one(
+                {"in_queue": True, "status": "ready", "published": {"$ne": True}},
+                sort=[("queue_order", 1)],
+            )
+            if post:
+                try:
+                    await _publish_and_store(post)
+                    logger.info("queue published %s", post["id"])
+                except Exception as e:
+                    logger.warning("queue publish failed %s: %s", post.get("id"), e)
+                    await db.posts.update_one({"id": post["id"]}, {"$set": {"in_queue": False, "queue_order": None, "error": f"Публикация из очереди не удалась: {e}"}})
+            # Держим ритм: следующий слот через интервал (даже если очередь пуста).
+            new_next = (now + timedelta(minutes=interval)).isoformat()
+            await db.app_config.update_one({"_id": "scheduler"}, {"$set": {"next_run_at": new_next}}, upsert=True)
+
+
+async def _scheduler_loop():
+    while True:
+        try:
+            await _scheduler_tick()
+        except Exception:
+            logger.exception("scheduler tick error")
+        await asyncio.sleep(60)
+
+
 @app.on_event("startup")
 async def on_startup():
     await auth.seed_admin()
+    asyncio.create_task(_scheduler_loop())
+    logger.info("Scheduler loop started")
     if os.environ.get("ENABLE_BOT_POLLING") == "1" and os.environ.get("TELEGRAM_BOT_TOKEN"):
         from telegram_bot import start_bot
         asyncio.create_task(start_bot())
