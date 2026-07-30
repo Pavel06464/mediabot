@@ -256,17 +256,38 @@ def _split_media(blocks):
 def _publish_caption(post: dict) -> str:
     photos_url = post.get("photos_url")
     videos_url = post.get("videos_url")
-    parts = [f"<b>{post['title']}</b>", ""]
-    if photos_url:
-        parts.append(f"📷 Фото: {photos_url}")
-    if videos_url:
-        parts.append(f"🎬 Видео: {videos_url}")
-    if not photos_url and not videos_url:
-        parts.append(post.get("telegraph_url") or "")
-    if post.get("hashtags"):
-        parts.append("")
-        parts.append(" ".join(post["hashtags"]))
-    return "\n".join(parts)
+    pc = post.get("photo_count") or 0
+    vc = post.get("video_count") or 0
+    blocks = post.get("blocks", [])
+    desc = next((b.get("value", "") for b in blocks if b.get("type") == "text"), "")
+
+    links = []
+    # Ссылку на фото показываем только если есть фото кроме обложки (> 1).
+    if photos_url and pc > 1:
+        links.append(f"📷 Фото ({pc}): {photos_url}")
+    if videos_url and vc > 0:
+        links.append(f"🎬 Видео ({vc}): {videos_url}")
+    # Легаси-пост с единственной статьёй — даём общую ссылку.
+    if not links and not photos_url and not videos_url and post.get("telegraph_url"):
+        links.append(post["telegraph_url"])
+
+    def build(d):
+        parts = [f"<b>{post['title']}</b>"]
+        if d:
+            parts += ["", d]
+        if links:
+            parts += [""] + links
+        if post.get("hashtags"):
+            parts += ["", " ".join(post["hashtags"])]
+        return "\n".join(parts)
+
+    cap = build(desc)
+    # Подпись sendPhoto ограничена 1024 символами — при необходимости режем описание.
+    if len(cap) > 1024 and desc:
+        overflow = len(cap) - 1024 + 1
+        desc = desc[:max(0, len(desc) - overflow)].rstrip() + "…"
+        cap = build(desc)
+    return cap[:1024]
 
 
 async def _do_publish(post: dict, channel: dict):
