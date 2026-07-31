@@ -26,6 +26,7 @@ import {
   CalendarClock,
   Clock,
   ListPlus,
+  ArrowUpDown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -121,6 +122,10 @@ export default function Dashboard() {
   const [totalPages, setTotalPages] = useState(1);
   const [qInput, setQInput] = useState("");
   const [q, setQ] = useState("");
+  const [sortBy, setSortBy] = useState("date");
+  const [sortDir, setSortDir] = useState("desc");
+  const [publishingAll, setPublishingAll] = useState(false);
+  const [confirmAll, setConfirmAll] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [delChannel, setDelChannel] = useState(false);
   const [delMedia, setDelMedia] = useState(true);
@@ -130,7 +135,7 @@ export default function Dashboard() {
     try {
       const [s, p, c] = await Promise.all([
         api.get("/stats"),
-        api.get(`/posts?page=${page}&page_size=20&q=${encodeURIComponent(q)}`),
+        api.get(`/posts?page=${page}&page_size=20&q=${encodeURIComponent(q)}&sort_by=${sortBy}&sort_dir=${sortDir}`),
         api.get("/settings"),
       ]);
       setStats(s.data);
@@ -142,7 +147,7 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [page, q]);
+  }, [page, q, sortBy, sortDir]);
 
   useEffect(() => {
     const t = setTimeout(() => { setQ(qInput); setPage(1); }, 400);
@@ -171,6 +176,21 @@ export default function Dashboard() {
       toast.error(err.response?.data?.detail || "Ошибка публикации");
     } finally {
       setPublishing(null);
+    }
+  };
+
+  const doPublishAll = async () => {
+    setConfirmAll(false);
+    if (!channel) { toast.error("Сначала настройте канал"); setChannelOpen(true); return; }
+    setPublishingAll(true);
+    try {
+      const { data } = await api.post("/posts/publish-all");
+      toast.success(`Публикуется ${data.started} постов — по одному раз в 5 секунд`);
+      load();
+    } catch (err) {
+      toast.error(err.response?.data?.detail || "Ошибка массовой публикации");
+    } finally {
+      setPublishingAll(false);
     }
   };
 
@@ -255,6 +275,25 @@ export default function Dashboard() {
       <ChannelSettings open={channelOpen} onOpenChange={setChannelOpen} onChange={load} />
       <WatermarkSettings open={watermarkOpen} onOpenChange={setWatermarkOpen} />
       <SchedulerSettings open={schedulerOpen} onOpenChange={setSchedulerOpen} onChange={load} />
+
+      <Dialog open={confirmAll} onOpenChange={setConfirmAll}>
+        <DialogContent className="rounded-none sm:max-w-md" data-testid="publish-all-dialog">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Send className="h-5 w-5 text-[#0055FF]" /> Опубликовать все посты
+            </DialogTitle>
+            <DialogDescription>
+              Все готовые неопубликованные посты уйдут в канал{channel ? ` «${channel.channel_title}»` : ""} по одному, с паузой 5 секунд между ними (чтобы Telegram не блокировал за флуд). Запланированные посты не затрагиваются.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setConfirmAll(false)} className="rounded-none border-zinc-200" data-testid="publish-all-cancel">Отмена</Button>
+            <Button onClick={doPublishAll} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="publish-all-confirm">
+              Опубликовать все
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!scheduleTarget} onOpenChange={(o) => !o && setScheduleTarget(null)}>
         <DialogContent className="rounded-none sm:max-w-md" data-testid="schedule-dialog">
@@ -365,9 +404,14 @@ export default function Dashboard() {
             <h1 className="text-4xl sm:text-5xl font-black tracking-tighter">Панель постов</h1>
             <p className="text-zinc-500 mt-2 max-w-2xl">Создавайте статьи Telegraph с медиа и публикуйте их в канал прямо отсюда.</p>
           </div>
-          <Button onClick={() => navigate("/new")} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="new-post-btn">
-            <Plus className="h-4 w-4 mr-2" /> Новый пост
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button onClick={() => setConfirmAll(true)} disabled={publishingAll} variant="outline" className="rounded-none border-[#0055FF] text-[#0055FF] hover:bg-blue-50" data-testid="publish-all-btn">
+              <Send className="h-4 w-4 mr-2" /> {publishingAll ? "Запуск…" : "Опубликовать все"}
+            </Button>
+            <Button onClick={() => navigate("/new")} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="new-post-btn">
+              <Plus className="h-4 w-4 mr-2" /> Новый пост
+            </Button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
@@ -419,7 +463,28 @@ export default function Dashboard() {
         <div className="bg-white border border-zinc-200" data-testid="posts-table">
           <div className="px-6 py-4 border-b border-zinc-200 flex items-center justify-between gap-4 flex-wrap">
             <span className="label-caps text-zinc-500">История постов</span>
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-3 flex-wrap">
+              <select
+                value={sortBy}
+                onChange={(e) => { setSortBy(e.target.value); setPage(1); }}
+                className="py-2 px-2 border border-zinc-200 text-sm outline-none focus:border-[#0055FF] bg-white"
+                data-testid="sort-by"
+              >
+                <option value="date">По дате</option>
+                <option value="title">По названию</option>
+                <option value="photos">По кол-ву фото</option>
+                <option value="videos">По кол-ву видео</option>
+                <option value="channel">По каналу</option>
+                <option value="status">По статусу</option>
+              </select>
+              <button
+                onClick={() => { setSortDir((d) => (d === "asc" ? "desc" : "asc")); setPage(1); }}
+                className="p-2 border border-zinc-200 text-zinc-500 hover:text-[#0055FF] hover:border-[#0055FF]"
+                title={sortDir === "asc" ? "По возрастанию" : "По убыванию"}
+                data-testid="sort-dir"
+              >
+                <ArrowUpDown className="h-4 w-4" />
+              </button>
               <div className="relative">
                 <Search className="h-4 w-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
                 <input
@@ -484,6 +549,11 @@ export default function Dashboard() {
                       </div>
                     </TableCell>
                     <TableCell>
+                      {p.channel_post_url && (
+                        <a href={p.channel_post_url} target="_blank" rel="noreferrer" className="text-green-600 font-semibold text-xs hover:underline flex items-center gap-1 mb-1.5" data-testid={`channel-link-${p.id}`}>
+                          <ExternalLink className="h-3 w-3" /> Открыть в канале
+                        </a>
+                      )}
                       {p.post_type === "native" ? (
                         <span className="text-xs text-zinc-500 flex items-center gap-1" data-testid={`native-label-${p.id}`}>
                           📎 альбом в канале

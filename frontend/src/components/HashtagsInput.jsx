@@ -8,7 +8,7 @@ const clean = (raw) =>
     .filter(Boolean)
     .map((t) => "#" + t);
 
-export function HashtagsInput({ tags, setTags }) {
+export function HashtagsInput({ tags, setTags, suggestions = [] }) {
   const [value, setValue] = useState("");
 
   const commit = (raw) => {
@@ -23,33 +23,57 @@ export function HashtagsInput({ tags, setTags }) {
     setValue("");
   };
 
+  const addTag = (tag) => {
+    setTags((prev) => (prev.some((t) => t.toLowerCase() === tag.toLowerCase()) ? prev : [...prev, tag]));
+  };
+
   const onKeyDown = (e) => {
     if (["Enter", ",", " "].includes(e.key)) { e.preventDefault(); commit(value); }
     else if (e.key === "Backspace" && !value && tags.length) setTags((prev) => prev.slice(0, -1));
   };
 
+  const avail = suggestions.filter((s) => !tags.some((t) => t.toLowerCase() === s.toLowerCase()));
+
   return (
-    <div className="border border-zinc-200 bg-white p-2 flex flex-wrap gap-2 items-center" data-testid="hashtags-input">
-      {tags.map((t) => (
-        <span key={t} className="inline-flex items-center gap-1 bg-blue-50 text-[#0055FF] text-sm font-semibold px-2 py-1" data-testid={`hashtag-${t.slice(1)}`}>
-          {t}
-          <button type="button" onClick={() => setTags((prev) => prev.filter((x) => x !== t))} className="hover:text-[#FF3333]">
-            <X className="h-3 w-3" />
-          </button>
-        </span>
-      ))}
-      <div className="flex items-center gap-1 flex-1 min-w-[140px]">
-        <Hash className="h-4 w-4 text-zinc-400" />
-        <input
-          data-testid="hashtags-field"
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={onKeyDown}
-          onBlur={() => commit(value)}
-          placeholder={tags.length ? "ещё тег…" : "теги через пробел или запятую"}
-          className="flex-1 outline-none text-sm bg-transparent py-1"
-        />
+    <div className="space-y-2">
+      <div className="border border-zinc-200 bg-white p-2 flex flex-wrap gap-2 items-center" data-testid="hashtags-input">
+        {tags.map((t) => (
+          <span key={t} className="inline-flex items-center gap-1 bg-blue-50 text-[#0055FF] text-sm font-semibold px-2 py-1" data-testid={`hashtag-${t.slice(1)}`}>
+            {t}
+            <button type="button" onClick={() => setTags((prev) => prev.filter((x) => x !== t))} className="hover:text-[#FF3333]">
+              <X className="h-3 w-3" />
+            </button>
+          </span>
+        ))}
+        <div className="flex items-center gap-1 flex-1 min-w-[140px]">
+          <Hash className="h-4 w-4 text-zinc-400" />
+          <input
+            data-testid="hashtags-field"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={onKeyDown}
+            onBlur={() => commit(value)}
+            placeholder={tags.length ? "ещё тег…" : "теги через пробел или запятую"}
+            className="flex-1 outline-none text-sm bg-transparent py-1"
+          />
+        </div>
       </div>
+      {avail.length > 0 && (
+        <div className="flex flex-wrap gap-2 items-center" data-testid="hashtag-suggestions">
+          <span className="text-xs text-zinc-400">Популярные:</span>
+          {avail.map((s) => (
+            <button
+              key={s}
+              type="button"
+              onClick={() => addTag(s)}
+              className="text-xs font-semibold text-zinc-600 border border-zinc-200 px-2 py-1 hover:border-[#0055FF] hover:text-[#0055FF] transition-colors duration-150"
+              data-testid={`suggest-tag-${s.slice(1)}`}
+            >
+              + {s}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

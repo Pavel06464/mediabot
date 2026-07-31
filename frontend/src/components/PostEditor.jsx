@@ -1,17 +1,28 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, Image as ImageIcon, Film, Star, Trash2, Save, UploadCloud, Send } from "lucide-react";
+import { ArrowLeft, Image as ImageIcon, Film, Star, Trash2, Save, UploadCloud, Send, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
+import api from "@/lib/api";
 import { useUpload } from "@/context/UploadContext";
 import { MarkdownToolbar } from "@/components/MarkdownToolbar";
 import { HashtagsInput } from "@/components/HashtagsInput";
 
 let idc = 0;
 const nid = () => `m${++idc}`;
+
+async function fileHash(file) {
+  try {
+    const buf = await file.arrayBuffer();
+    const digest = await crypto.subtle.digest("SHA-256", buf);
+    return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    return `${file.name}-${file.size}-${file.lastModified}`; // fallback
+  }
+}
 
 function Dropzone({ accept, multiple, onFiles, children, testid, inputTestid }) {
   const [drag, setDrag] = useState(false);
@@ -51,14 +62,48 @@ export default function PostEditor() {
   const [videos, setVideos] = useState([]);
   const [publishAfter, setPublishAfter] = useState(false);
   const [postType, setPostType] = useState("telegraph");
+  const [popularTags, setPopularTags] = useState([]);
+  const [titleWarn, setTitleWarn] = useState(false);
+
+  useEffect(() => {
+    api.get("/hashtags/popular?limit=5").then(({ data }) => setPopularTags((data.tags || []).map((t) => t.tag))).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const t = title.trim();
+    if (!t) { setTitleWarn(false); return; }
+    const id = setTimeout(async () => {
+      try {
+        const { data } = await api.get(`/posts/check-title?title=${encodeURIComponent(t)}`);
+        setTitleWarn(!!data.exists);
+      } catch { setTitleWarn(false); }
+    }, 500);
+    return () => clearTimeout(id);
+  }, [title]);
 
   const onCover = useCallback((files) => {
     const f = files[0];
     setCover({ file: f, localUrl: URL.createObjectURL(f) });
   }, []);
-  const addMedia = useCallback((files, kind) => {
-    const setter = kind === "video" ? setVideos : setPhotos;
-    setter((prev) => [...prev, ...files.map((f) => ({ id: nid(), file: f, localUrl: URL.createObjectURL(f), caption: "" }))]);
+  const addMedia = useCallback(async (files, kind) => {
+    if (kind === "video") {
+      setVideos((prev) => [...prev, ...files.map((f) => ({ id: nid(), file: f, localUrl: URL.createObjectURL(f), caption: "" }))]);
+      return;
+    }
+    // фото: пропускаем побайтовые дубликаты (внутри текущего поста)
+    const hashed = await Promise.all(files.map(async (f) => ({ f, h: await fileHash(f) })));
+    setPhotos((prev) => {
+      const seen = new Set(prev.map((p) => p.hash).filter(Boolean));
+      const added = [];
+      let dups = 0;
+      for (const { f, h } of hashed) {
+        if (seen.has(h)) { dups += 1; continue; }
+        seen.add(h);
+        added.push({ id: nid(), file: f, localUrl: URL.createObjectURL(f), caption: "", hash: h });
+      }
+      if (dups > 0) toast.info(`Пропущено дубликатов фото: ${dups}`);
+      return [...prev, ...added];
+    });
   }, []);
   const updCaption = (kind, id, caption) => {
     const setter = kind === "video" ? setVideos : setPhotos;
@@ -106,6 +151,11 @@ export default function PostEditor() {
           <span className="label-caps text-zinc-400">Новый пост</span>
           <Input data-testid="editor-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Заголовок"
             className="rounded-none border-0 border-b-2 border-zinc-200 px-0 text-3xl font-black tracking-tight h-auto py-3 mt-2 focus-visible:ring-0 focus-visible:border-[#0055FF]" />
+          {titleWarn && (
+            <p className="text-xs text-amber-600 mt-2 flex items-center gap-1.5" data-testid="title-dup-warning">
+              <AlertTriangle className="h-3.5 w-3.5" /> Пост с таким названием уже существует
+            </p>
+          )}
         </div>
 
         <section>
@@ -160,7 +210,7 @@ export default function PostEditor() {
             <h2 className="text-lg font-bold tracking-tight">Хештеги</h2>
             <span className="text-sm text-zinc-400">— добавятся в сообщение канала (не в статью)</span>
           </div>
-          <HashtagsInput tags={hashtags} setTags={setHashtags} />
+          <HashtagsInput tags={hashtags} setTags={setHashtags} suggestions={popularTags} />
         </section>
 
         <section>

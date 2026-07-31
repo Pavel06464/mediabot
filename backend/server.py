@@ -180,7 +180,9 @@ async def get_stats(user=Depends(auth.get_current_user)):
 
 # ---------- Posts ----------
 @api_router.get("/posts")
-async def get_posts(page: int = 1, page_size: int = 20, q: str = "", user=Depends(auth.get_current_user)):
+async def get_posts(page: int = 1, page_size: int = 20, q: str = "",
+                    sort_by: str = "date", sort_dir: str = "desc",
+                    user=Depends(auth.get_current_user)):
     page = max(1, page)
     page_size = min(100, max(1, page_size))
     query = {}
@@ -188,7 +190,31 @@ async def get_posts(page: int = 1, page_size: int = 20, q: str = "", user=Depend
         query["title"] = {"$regex": re.escape(q.strip()), "$options": "i"}
     total = await db.posts.count_documents(query)
     skip = (page - 1) * page_size
-    items = await db.posts.find(query, {"_id": 0, "blocks": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    direction = 1 if sort_dir == "asc" else -1
+
+    pipeline = [{"$match": query}]
+    collation = None
+    if sort_by == "status":
+        pipeline.append({"$addFields": {"_rank": {"$switch": {"branches": [
+            {"case": {"$in": ["$status", ["uploading", "processing"]]}, "then": 0},
+            {"case": {"$eq": ["$status", "ready"]}, "then": 1},
+            {"case": {"$eq": ["$status", "published"]}, "then": 2},
+            {"case": {"$eq": ["$status", "failed"]}, "then": 3},
+        ], "default": 4}}}})
+        sort_stage = {"_rank": direction, "created_at": -1}
+    else:
+        field = {"title": "title", "photos": "photo_count", "videos": "video_count",
+                 "date": "created_at", "channel": "channel_title"}.get(sort_by, "created_at")
+        sort_stage = {field: direction}
+        if field != "created_at":
+            sort_stage["created_at"] = -1
+        if sort_by == "title":
+            collation = {"locale": "ru", "strength": 2}
+    pipeline += [{"$sort": sort_stage}, {"$skip": skip}, {"$limit": page_size},
+                 {"$project": {"_id": 0, "blocks": 0, "_rank": 0}}]
+
+    cursor = db.posts.aggregate(pipeline, collation=collation) if collation else db.posts.aggregate(pipeline)
+    items = await cursor.to_list(page_size)
     return {
         "items": items,
         "total": total,
@@ -196,6 +222,28 @@ async def get_posts(page: int = 1, page_size: int = 20, q: str = "", user=Depend
         "page_size": page_size,
         "pages": max(1, (total + page_size - 1) // page_size),
     }
+
+
+@api_router.get("/posts/check-title")
+async def check_title(title: str = "", user=Depends(auth.get_current_user)):
+    t = (title or "").strip()
+    if not t:
+        return {"exists": False, "count": 0}
+    count = await db.posts.count_documents({"title": {"$regex": f"^{re.escape(t)}$", "$options": "i"}})
+    return {"exists": count > 0, "count": count}
+
+
+@api_router.get("/hashtags/popular")
+async def popular_hashtags(limit: int = 5, user=Depends(auth.get_current_user)):
+    limit = min(50, max(1, limit))
+    pipeline = [
+        {"$unwind": "$hashtags"},
+        {"$group": {"_id": "$hashtags", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": limit},
+    ]
+    rows = await db.posts.aggregate(pipeline).to_list(limit)
+    return {"tags": [{"tag": r["_id"], "count": r["count"]} for r in rows if r["_id"]]}
 
 
 @api_router.get("/posts/{post_id}")
@@ -306,6 +354,19 @@ def _publish_caption(post: dict) -> str:
         desc = desc[:max(0, len(desc) - overflow)].rstrip() + "…"
         cap = build(desc)
     return cap[:1024]
+
+
+def _channel_post_url(channel: dict, message_id) -> Optional[str]:
+    """Ссылка на сообщение в канале: t.me/username/id или t.me/c/internal/id."""
+    if not message_id or not channel:
+        return None
+    uname = channel.get("channel_username")
+    if uname:
+        return f"https://t.me/{uname}/{message_id}"
+    cid = str(channel.get("channel_id") or "")
+    if cid.startswith("-100"):
+        return f"https://t.me/c/{cid[4:]}/{message_id}"
+    return None
 
 
 async def _do_publish(post: dict, channel: dict):
@@ -434,6 +495,7 @@ async def _finalize_native(post_id: str):
                 channel_title = channel.get("channel_title")
                 upd["channel_message_ids"] = msg_ids
                 upd["channel_message_id"] = msg_ids[0] if msg_ids else None
+                upd["channel_post_url"] = _channel_post_url(channel, msg_ids[0] if msg_ids else None)
                 upd["status"] = "published"
             except Exception as e:
                 logger.warning("native auto-publish failed: %s", e)
@@ -561,6 +623,7 @@ async def _finalize_post(post_id: str):
                 published = True
                 channel_title = channel.get("channel_title")
                 upd["channel_message_id"] = msg_id
+                upd["channel_post_url"] = _channel_post_url(channel, msg_id)
                 upd["status"] = "published"
             except Exception as e:
                 logger.warning("auto-publish failed: %s", e)
@@ -725,12 +788,13 @@ async def _publish_and_store(post: dict) -> dict:
         raise ValueError("Канал не настроен")
     if post.get("post_type") == "native":
         msg_ids = await _do_publish_native(post, channel)
-        set_fields = {"channel_message_ids": msg_ids, "channel_message_id": msg_ids[0] if msg_ids else None}
+        set_fields = {"channel_message_ids": msg_ids, "channel_message_id": msg_ids[0] if msg_ids else None,
+                      "channel_post_url": _channel_post_url(channel, msg_ids[0] if msg_ids else None)}
     else:
         if not post.get("telegraph_url"):
             raise ValueError("Статья ещё создаётся")
         msg_id = await _do_publish(post, channel)
-        set_fields = {"channel_message_id": msg_id}
+        set_fields = {"channel_message_id": msg_id, "channel_post_url": _channel_post_url(channel, msg_id)}
     set_fields.update({
         "published": True,
         "status": "published",
@@ -760,6 +824,39 @@ async def publish_post(post_id: str, user=Depends(auth.get_current_user)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка публикации: {e}")
     return {"status": "published", "channel_title": channel_title}
+
+
+PUBLISH_ALL_PAUSE = 5  # пауза между постами при массовой публикации (анти-флуд)
+
+
+async def _publish_all_task(ids: list):
+    for pid in ids:
+        post = await db.posts.find_one({"id": pid})
+        if not post or post.get("published") or post.get("status") != "ready":
+            continue
+        try:
+            await _publish_and_store(post)
+            logger.info("publish-all: published %s", pid)
+        except Exception as e:
+            logger.warning("publish-all failed %s: %s", pid, e)
+            await db.posts.update_one({"id": pid}, {"$set": {"error": f"Массовая публикация: {e}"}})
+        await asyncio.sleep(PUBLISH_ALL_PAUSE)
+
+
+@api_router.post("/posts/publish-all")
+async def publish_all(user=Depends(auth.get_current_user)):
+    channel = await db.app_config.find_one({"_id": "channel"})
+    if not channel:
+        raise HTTPException(status_code=400, detail="Сначала настройте канал в настройках")
+    rows = await db.posts.find(
+        {"status": "ready", "published": {"$ne": True}, "scheduled_at": None},
+        {"id": 1},
+    ).sort("created_at", 1).to_list(2000)
+    ids = [r["id"] for r in rows]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Нет готовых постов для публикации")
+    asyncio.create_task(_publish_all_task(ids))
+    return {"started": len(ids)}
 
 
 def _parse_scheduled(s: str) -> str:
@@ -1139,7 +1236,7 @@ async def set_channel(payload: ChannelIn, user=Depends(auth.get_current_user)):
     title = chat.get("title") or chat.get("username") or str(chat.get("id"))
     await db.app_config.update_one(
         {"_id": "channel"},
-        {"$set": {"channel_id": chat["id"], "channel_title": title}},
+        {"$set": {"channel_id": chat["id"], "channel_title": title, "channel_username": chat.get("username")}},
         upsert=True,
     )
     return {"channel_id": chat["id"], "channel_title": title}
