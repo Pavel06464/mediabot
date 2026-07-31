@@ -1152,13 +1152,15 @@ async def delete_post(post_id: str, delete_channel: bool = False, delete_media: 
     if delete_channel:
         msg_ids = post.get("channel_message_ids") or ([post["channel_message_id"]] if post.get("channel_message_id") else [])
         if msg_ids:
-            channel = await db.app_config.find_one({"_id": "channel"})
+            channel = await _resolve_channel(post)
             if channel:
                 for mid in msg_ids:
                     try:
                         await telegram_api.delete_message(channel["channel_id"], mid)
                     except Exception as e:
                         logger.warning("delete channel message failed: %s", e)
+            else:
+                logger.warning("delete channel message skipped: канал не найден для поста %s", post_id)
     if delete_media:
         bucket = get_gridfs()
         for mid in post.get("media_ids", []):
