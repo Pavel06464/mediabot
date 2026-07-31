@@ -96,6 +96,7 @@ class PostEditIn(BaseModel):
     hashtags: List[str] = []
     media: List[MediaEdit] = []
     new_media: List[NewMediaIn] = []
+    channel_ref: Optional[str] = None
 
 
 class ScheduleIn(BaseModel):
@@ -1201,6 +1202,7 @@ async def get_post_for_edit(post_id: str, user=Depends(auth.get_current_user)):
         "hashtags": tags,
         "post_type": post.get("post_type", "telegraph"),
         "telegraph_url": post.get("telegraph_url"),
+        "channel_ref": post.get("channel_ref"),
         "media": media,
     }
 
@@ -1287,6 +1289,7 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
                 "title": title,
                 "blocks": blocks,
                 "hashtags": tags,
+                "channel_ref": payload.channel_ref or post.get("channel_ref"),
                 "cover_url": cover["url"] if cover else None,
                 "media_ids": media_ids,
                 "r2_keys": r2_keys,
@@ -1339,6 +1342,7 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
             "title": title,
             "blocks": blocks,
             "hashtags": tags,
+            "channel_ref": payload.channel_ref or post.get("channel_ref"),
             "telegraph_url": photos_url or videos_url,
             "telegraph_path": (photos_paths or videos_paths or [None])[0],
             "photos_url": photos_url,

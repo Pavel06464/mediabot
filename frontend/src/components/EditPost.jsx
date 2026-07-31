@@ -50,16 +50,23 @@ export default function EditPost() {
   const [media, setMedia] = useState([]);
   const [newMedia, setNewMedia] = useState([]); // {tempId, kind, localUrl, uploading, url, media_id, r2_key, caption}
   const [link, setLink] = useState(null);
+  const [channels, setChannels] = useState([]);
+  const [channelRef, setChannelRef] = useState("");
 
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await api.get(`/posts/${id}/edit`);
+        const [{ data }, chRes] = await Promise.all([
+          api.get(`/posts/${id}/edit`),
+          api.get("/channels").catch(() => ({ data: { channels: [] } })),
+        ]);
         setTitle(data.title);
         setDescription(data.description || "");
         setHashtags(data.hashtags || []);
         setMedia(data.media || []);
         setLink(data.telegraph_url);
+        setChannels(chRes.data.channels || []);
+        setChannelRef(data.channel_ref || chRes.data.channels?.[0]?.id || "");
       } catch (e) {
         toast.error(e.response?.data?.detail || "Не удалось загрузить пост");
         navigate("/");
@@ -114,6 +121,7 @@ export default function EditPost() {
         new_media: newMedia.filter((m) => m.url).map((m) => ({
           kind: m.kind, url: m.url, media_id: m.media_id, r2_key: m.r2_key, caption: m.caption || "", is_cover: false,
         })),
+        channel_ref: channelRef || null,
       });
       toast.success("Пост обновлён");
       navigate("/");
@@ -165,6 +173,21 @@ export default function EditPost() {
           <h2 className="text-lg font-bold tracking-tight mb-3">Хештеги</h2>
           <HashtagsInput tags={hashtags} setTags={setHashtags} />
         </section>
+
+        {channels.length > 0 && (
+          <section>
+            <h2 className="text-lg font-bold tracking-tight mb-3">Канал публикации</h2>
+            <select
+              value={channelRef}
+              onChange={(e) => setChannelRef(e.target.value)}
+              className="w-full border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-[#0055FF] bg-white"
+              data-testid="edit-channel"
+            >
+              {channels.map((c) => <option key={c.id} value={c.id}>{c.channel_title}</option>)}
+            </select>
+            <p className="text-xs text-zinc-400 mt-2">В какой канал отправлять этот пост при публикации.</p>
+          </section>
+        )}
 
         {media.length > 0 && (
           <section>
