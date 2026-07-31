@@ -10,6 +10,7 @@ import api from "@/lib/api";
 import { useUpload } from "@/context/UploadContext";
 import { MarkdownToolbar } from "@/components/MarkdownToolbar";
 import { HashtagsInput } from "@/components/HashtagsInput";
+import SignaturesManager from "@/components/SignaturesManager";
 
 let idc = 0;
 const nid = () => `m${++idc}`;
@@ -66,6 +67,19 @@ export default function PostEditor() {
   const [titleWarn, setTitleWarn] = useState(false);
   const [channels, setChannels] = useState([]);
   const [channelRef, setChannelRef] = useState("");
+  const [signatures, setSignatures] = useState([]);
+  const [sigOpen, setSigOpen] = useState(false);
+
+  const loadSignatures = useCallback(() => {
+    api.get("/signatures").then(({ data }) => setSignatures(data.signatures || [])).catch(() => {});
+  }, []);
+
+  const insertSignature = (id) => {
+    const sig = signatures.find((s) => s.id === id);
+    if (!sig) return;
+    setDescription((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${sig.content}` : sig.content));
+    toast.success(`Подпись «${sig.name}» вставлена`);
+  };
 
   useEffect(() => {
     api.get("/hashtags/popular?limit=5").then(({ data }) => setPopularTags((data.tags || []).map((t) => t.tag))).catch(() => {});
@@ -73,7 +87,8 @@ export default function PostEditor() {
       setChannels(data.channels || []);
       if (data.channels?.length) setChannelRef(data.channels[0].id);
     }).catch(() => {});
-  }, []);
+    loadSignatures();
+  }, [loadSignatures]);
 
   useEffect(() => {
     const t = title.trim();
@@ -205,11 +220,31 @@ export default function PostEditor() {
         </section>
 
         <section>
-          <h2 className="text-lg font-bold tracking-tight mb-3">Описание</h2>
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h2 className="text-lg font-bold tracking-tight">Описание</h2>
+            <div className="flex items-center gap-2">
+              {signatures.length > 0 && (
+                <select
+                  value=""
+                  onChange={(e) => { insertSignature(e.target.value); e.target.value = ""; }}
+                  className="border border-zinc-200 px-2 py-1.5 text-sm outline-none focus:border-[#0055FF] bg-white"
+                  data-testid="insert-signature"
+                >
+                  <option value="">+ Вставить подпись…</option>
+                  {signatures.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              )}
+              <button onClick={() => setSigOpen(true)} className="text-sm text-[#0055FF] hover:underline whitespace-nowrap" data-testid="manage-signatures-btn">
+                Подписи
+              </button>
+            </div>
+          </div>
           <MarkdownToolbar textareaRef={descRef} value={description} onChange={setDescription} />
           <Textarea ref={descRef} data-testid="editor-description" value={description} onChange={(e) => setDescription(e.target.value)}
-            placeholder="Текст статьи (необязательно). Поддержка: **жирный**, *курсив*, [ссылка](url), # заголовок, > цитата" className="rounded-none min-h-[120px]" />
+            placeholder="Текст статьи (необязательно). Поддержка: **жирный**, *курсив*, [ссылка](url) — ссылка прячется за текстом, # заголовок, > цитата" className="rounded-none min-h-[120px]" />
         </section>
+
+        <SignaturesManager open={sigOpen} onOpenChange={setSigOpen} onChange={loadSignatures} />
 
         <section>
           <div className="flex items-center gap-2 mb-3">

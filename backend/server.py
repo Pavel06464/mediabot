@@ -1,6 +1,7 @@
 import os
 import re
 import uuid
+import html as _html
 import asyncio
 import tempfile
 import logging
@@ -121,6 +122,11 @@ class ChannelSchedulerIn(BaseModel):
     enabled: bool = False
     interval_minutes: int = 60
     auto_enqueue: bool = False
+
+
+class SignatureIn(BaseModel):
+    name: str
+    content: str = ""
 
 
 def _normalize_tags(raw):
@@ -298,6 +304,38 @@ async def popular_hashtags(limit: int = 5, user=Depends(auth.get_current_user)):
     return {"tags": [{"tag": r["_id"], "count": r["count"]} for r in rows if r["_id"]]}
 
 
+@api_router.get("/signatures")
+async def list_signatures(user=Depends(auth.get_current_user)):
+    rows = await db.signatures.find({}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    return {"signatures": rows}
+
+
+@api_router.post("/signatures")
+async def create_signature(payload: SignatureIn, user=Depends(auth.get_current_user)):
+    if not payload.name.strip():
+        raise HTTPException(status_code=400, detail="Укажите название подписи")
+    doc = {"id": str(uuid.uuid4()), "name": payload.name.strip(), "content": payload.content or "",
+           "created_at": datetime.now(timezone.utc).isoformat()}
+    await db.signatures.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api_router.put("/signatures/{sig_id}")
+async def update_signature(sig_id: str, payload: SignatureIn, user=Depends(auth.get_current_user)):
+    r = await db.signatures.update_one({"id": sig_id}, {"$set": {"name": payload.name.strip(), "content": payload.content or ""}})
+    if r.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Подпись не найдена")
+    return {"status": "ok"}
+
+
+@api_router.delete("/signatures/{sig_id}")
+async def delete_signature(sig_id: str, user=Depends(auth.get_current_user)):
+    await db.signatures.delete_one({"id": sig_id})
+    return {"status": "ok"}
+
+
+
 @api_router.get("/posts/{post_id}")
 async def get_post(post_id: str, user=Depends(auth.get_current_user)):
     post = await db.posts.find_one({"id": post_id}, {"_id": 0, "blocks": 0})
@@ -371,6 +409,25 @@ def _split_media(blocks):
     return text_blocks, photos, videos, cover
 
 
+_LINK_RE = re.compile(r'\[([^\]]+)\]\((https?://[^)\s]+)\)')
+_BOLD_RE = re.compile(r'\*\*([^*]+)\*\*')
+_ITALIC_RE = re.compile(r'__([^_]+)__')
+
+
+def _caption_html(text: str) -> str:
+    """Конвертирует лёгкий markdown подписи в Telegram-HTML: скрытые ссылки, жирный, курсив.
+
+    [Надпись](https://ссылка) → <a href="...">Надпись</a> (ссылка спрятана за текстом).
+    """
+    if not text:
+        return ""
+    t = _html.escape(text, quote=False)
+    t = _LINK_RE.sub(lambda m: f'<a href="{m.group(2)}">{m.group(1)}</a>', t)
+    t = _BOLD_RE.sub(lambda m: f'<b>{m.group(1)}</b>', t)
+    t = _ITALIC_RE.sub(lambda m: f'<i>{m.group(1)}</i>', t)
+    return t
+
+
 def _publish_caption(post: dict) -> str:
     photos_url = post.get("photos_url")
     videos_url = post.get("videos_url")
@@ -380,17 +437,15 @@ def _publish_caption(post: dict) -> str:
     desc = next((b.get("value", "") for b in blocks if b.get("type") == "text"), "")
 
     links = []
-    # Ссылку на фото показываем только если есть фото кроме обложки (> 1).
     if photos_url and pc > 1:
         links.append(f"📷 Фото ({pc}): {photos_url}")
     if videos_url and vc > 0:
         links.append(f"🎬 Видео ({vc}): {videos_url}")
-    # Легаси-пост с единственной статьёй — даём общую ссылку.
     if not links and not photos_url and not videos_url and post.get("telegraph_url"):
         links.append(post["telegraph_url"])
 
-    def build(d):
-        parts = [f"<b>{post['title']}</b>"]
+    def plain(d):
+        parts = [post["title"]]
         if d:
             parts += ["", d]
         if links:
@@ -399,13 +454,19 @@ def _publish_caption(post: dict) -> str:
             parts += ["", " ".join(post["hashtags"])]
         return "\n".join(parts)
 
-    cap = build(desc)
-    # Подпись sendPhoto ограничена 1024 символами — при необходимости режем описание.
-    if len(cap) > 1024 and desc:
-        overflow = len(cap) - 1024 + 1
+    # обрезаем описание по «сырой» длине, чтобы не сломать HTML-теги
+    if len(plain(desc)) > 1024 and desc:
+        overflow = len(plain(desc)) - 1024 + 1
         desc = desc[:max(0, len(desc) - overflow)].rstrip() + "…"
-        cap = build(desc)
-    return cap[:1024]
+
+    parts = [f"<b>{_html.escape(post['title'], quote=False)}</b>"]
+    if desc:
+        parts += ["", _caption_html(desc)]
+    if links:
+        parts += [""] + [_caption_html(l) for l in links]
+    if post.get("hashtags"):
+        parts += ["", " ".join(post["hashtags"])]
+    return "\n".join(parts)
 
 
 def _channel_post_url(channel: dict, message_id) -> Optional[str]:
@@ -436,14 +497,28 @@ async def _do_publish(post: dict, channel: dict):
 
 
 def _native_caption(post: dict) -> str:
-    parts = [f"<b>{post['title']}</b>"]
     blocks = post.get("blocks", [])
     desc = next((b.get("value", "") for b in blocks if b.get("type") == "text"), "")
+    hashtags = post.get("hashtags") or []
+
+    def plain(d):
+        parts = [post["title"]]
+        if d:
+            parts += ["", d]
+        if hashtags:
+            parts += ["", " ".join(hashtags)]
+        return "\n".join(parts)
+
+    if len(plain(desc)) > 1024 and desc:
+        overflow = len(plain(desc)) - 1024 + 1
+        desc = desc[:max(0, len(desc) - overflow)].rstrip() + "…"
+
+    parts = [f"<b>{_html.escape(post['title'], quote=False)}</b>"]
     if desc:
-        parts += ["", desc]
-    if post.get("hashtags"):
-        parts += ["", " ".join(post["hashtags"])]
-    return "\n".join(parts)[:1024]
+        parts += ["", _caption_html(desc)]
+    if hashtags:
+        parts += ["", " ".join(hashtags)]
+    return "\n".join(parts)
 
 
 async def _do_publish_native(post: dict, channel: dict):
