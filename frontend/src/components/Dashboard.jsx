@@ -118,6 +118,13 @@ export default function Dashboard() {
   const [scheduleTarget, setScheduleTarget] = useState(null);
   const [scheduleValue, setScheduleValue] = useState("");
   const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleChannel, setScheduleChannel] = useState("");
+  const [channels, setChannels] = useState([]);
+
+  useEffect(() => {
+    api.get("/channels").then(({ data }) => setChannels(data.channels || [])).catch(() => {});
+  }, [schedulerOpen]);
+  const chanName = (ref) => channels.find((c) => c.id === ref)?.channel_title;
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [qInput, setQInput] = useState("");
@@ -166,7 +173,7 @@ export default function Dashboard() {
   const copyLink = (url) => { navigator.clipboard.writeText(url); toast.success("Ссылка скопирована"); };
 
   const publish = async (id) => {
-    if (!channel) { toast.error("Сначала настройте канал"); setChannelOpen(true); return; }
+    if (!channels.length) { toast.error("Сначала добавьте канал"); setSchedulerOpen(true); return; }
     setPublishing(id);
     try {
       const { data } = await api.post(`/posts/${id}/publish`);
@@ -217,6 +224,7 @@ export default function Dashboard() {
 
   const openSchedule = (post) => {
     setScheduleTarget(post);
+    setScheduleChannel(post.channel_ref || channels[0]?.id || "");
     if (post.scheduled_at) {
       try {
         const d = new Date(post.scheduled_at);
@@ -233,7 +241,7 @@ export default function Dashboard() {
     if (!scheduleValue) return toast.error("Укажите дату и время");
     setScheduleSaving(true);
     try {
-      await api.post(`/posts/${scheduleTarget.id}/schedule`, { scheduled_at: scheduleValue });
+      await api.post(`/posts/${scheduleTarget.id}/schedule`, { scheduled_at: scheduleValue, channel_ref: scheduleChannel || null });
       toast.success("Пост запланирован");
       setScheduleTarget(null);
       load();
@@ -276,25 +284,6 @@ export default function Dashboard() {
       <WatermarkSettings open={watermarkOpen} onOpenChange={setWatermarkOpen} />
       <SchedulerSettings open={schedulerOpen} onOpenChange={setSchedulerOpen} onChange={load} />
 
-      <Dialog open={confirmAll} onOpenChange={setConfirmAll}>
-        <DialogContent className="rounded-none sm:max-w-md" data-testid="publish-all-dialog">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Send className="h-5 w-5 text-[#0055FF]" /> Опубликовать все посты
-            </DialogTitle>
-            <DialogDescription>
-              Все готовые неопубликованные посты уйдут в канал{channel ? ` «${channel.channel_title}»` : ""} по одному, с паузой 5 секунд между ними (чтобы Telegram не блокировал за флуд). Запланированные посты не затрагиваются.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="gap-2">
-            <Button variant="outline" onClick={() => setConfirmAll(false)} className="rounded-none border-zinc-200" data-testid="publish-all-cancel">Отмена</Button>
-            <Button onClick={doPublishAll} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="publish-all-confirm">
-              Опубликовать все
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       <Dialog open={!!scheduleTarget} onOpenChange={(o) => !o && setScheduleTarget(null)}>
         <DialogContent className="rounded-none sm:max-w-md" data-testid="schedule-dialog">
           <DialogHeader>
@@ -305,7 +294,20 @@ export default function Dashboard() {
               «{scheduleTarget?.title}» уйдёт в канал в указанное время (по UTC).
             </DialogDescription>
           </DialogHeader>
-          <div className="py-2 space-y-2">
+          <div className="py-2 space-y-3">
+            {channels.length > 0 && (
+              <div>
+                <label className="label-caps text-zinc-500 block mb-1">Канал</label>
+                <select
+                  value={scheduleChannel}
+                  onChange={(e) => setScheduleChannel(e.target.value)}
+                  className="w-full border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-[#0055FF] bg-white"
+                  data-testid="schedule-channel"
+                >
+                  {channels.map((c) => <option key={c.id} value={c.id}>{c.channel_title}</option>)}
+                </select>
+              </div>
+            )}
             <label className="label-caps text-zinc-500 block">Дата и время (UTC)</label>
             <input
               type="datetime-local"
@@ -380,13 +382,10 @@ export default function Dashboard() {
           </div>
           <div className="flex items-center gap-2">
             <Button onClick={() => setSchedulerOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="scheduler-settings-btn">
-              <CalendarClock className="h-4 w-4 mr-2" /> Планировщик
+              <CalendarClock className="h-4 w-4 mr-2" /> Каналы и план
             </Button>
             <Button onClick={() => setWatermarkOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="watermark-settings-btn">
               <Droplets className="h-4 w-4 mr-2" /> Знак
-            </Button>
-            <Button onClick={() => setChannelOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="channel-settings-btn">
-              <Settings className="h-4 w-4 mr-2" /> {channel ? channel.channel_title : "Канал"}
             </Button>
             <Button onClick={load} variant="outline" className="rounded-none border-zinc-200" data-testid="refresh-btn">
               <RefreshCw className="h-4 w-4" />
@@ -405,9 +404,6 @@ export default function Dashboard() {
             <p className="text-zinc-500 mt-2 max-w-2xl">Создавайте статьи Telegraph с медиа и публикуйте их в канал прямо отсюда.</p>
           </div>
           <div className="flex items-center gap-2">
-            <Button onClick={() => setConfirmAll(true)} disabled={publishingAll} variant="outline" className="rounded-none border-[#0055FF] text-[#0055FF] hover:bg-blue-50" data-testid="publish-all-btn">
-              <Send className="h-4 w-4 mr-2" /> {publishingAll ? "Запуск…" : "Опубликовать все"}
-            </Button>
             <Button onClick={() => navigate("/new")} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="new-post-btn">
               <Plus className="h-4 w-4 mr-2" /> Новый пост
             </Button>
@@ -495,7 +491,7 @@ export default function Dashboard() {
                   data-testid="posts-search"
                 />
               </div>
-              <span className="text-sm text-zinc-400 whitespace-nowrap">{channel ? `Канал: ${channel.channel_title}` : "Канал не настроен"}</span>
+              <span className="text-sm text-zinc-400 whitespace-nowrap">{channels.length ? `Каналов: ${channels.length}` : "Нет каналов"}</span>
             </div>
           </div>
 
@@ -613,6 +609,11 @@ export default function Dashboard() {
                             {!p.published && !p.scheduled_at && p.in_queue && (
                               <span className="text-[11px] text-amber-600 flex items-center gap-1 whitespace-nowrap" data-testid={`queued-badge-${p.id}`}>
                                 <ListPlus className="h-3 w-3" /> в очереди
+                              </span>
+                            )}
+                            {(p.channel_title || chanName(p.channel_ref)) && (
+                              <span className="text-[11px] text-zinc-400 truncate max-w-[130px]" data-testid={`post-channel-${p.id}`}>
+                                → {p.channel_title || chanName(p.channel_ref)}
                               </span>
                             )}
                           </div>

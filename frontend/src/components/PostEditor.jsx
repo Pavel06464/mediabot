@@ -64,9 +64,15 @@ export default function PostEditor() {
   const [postType, setPostType] = useState("telegraph");
   const [popularTags, setPopularTags] = useState([]);
   const [titleWarn, setTitleWarn] = useState(false);
+  const [channels, setChannels] = useState([]);
+  const [channelRef, setChannelRef] = useState("");
 
   useEffect(() => {
     api.get("/hashtags/popular?limit=5").then(({ data }) => setPopularTags((data.tags || []).map((t) => t.tag))).catch(() => {});
+    api.get("/channels").then(({ data }) => {
+      setChannels(data.channels || []);
+      if (data.channels?.length) setChannelRef(data.channels[0].id);
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -128,7 +134,7 @@ export default function PostEditor() {
     photos.forEach((p) => items.push({ kind: "photo", is_cover: false, caption: p.caption, file: p.file }));
     videos.forEach((v) => items.push({ kind: "video", is_cover: false, caption: v.caption, file: v.file }));
 
-    startJob({ meta: { title: title.trim(), description: description.trim(), publish_after: publishAfter, hashtags, post_type: postType }, items });
+    startJob({ meta: { title: title.trim(), description: description.trim(), publish_after: publishAfter, hashtags, post_type: postType, channel_ref: channelRef || null }, items });
     toast.info("Загрузка началась — следите за прогрессом на дашборде");
     navigate("/");
   };
@@ -212,6 +218,20 @@ export default function PostEditor() {
           </div>
           <HashtagsInput tags={hashtags} setTags={setHashtags} suggestions={popularTags} />
         </section>
+
+        {channels.length > 0 && (
+          <section>
+            <h2 className="text-lg font-bold tracking-tight mb-3">Канал публикации</h2>
+            <select
+              value={channelRef}
+              onChange={(e) => setChannelRef(e.target.value)}
+              className="w-full border border-zinc-200 px-3 py-2 text-sm outline-none focus:border-[#0055FF] bg-white"
+              data-testid="editor-channel"
+            >
+              {channels.map((c) => <option key={c.id} value={c.id}>{c.channel_title}</option>)}
+            </select>
+          </section>
+        )}
 
         <section>
           <div className="flex items-center gap-2 mb-3">

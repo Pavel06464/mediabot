@@ -71,6 +71,7 @@ class DraftIn(BaseModel):
     post_type: str = "telegraph"  # telegraph | native
     hashtags: List[str] = []
     media: List[MediaDesc] = []
+    channel_ref: Optional[str] = None  # id канала (channels.id)
 
 
 class MediaEdit(BaseModel):
@@ -98,10 +99,12 @@ class PostEditIn(BaseModel):
 
 class ScheduleIn(BaseModel):
     scheduled_at: Optional[str] = None  # ISO datetime (интерпретируется как UTC)
+    channel_ref: Optional[str] = None
 
 
 class QueueIn(BaseModel):
     in_queue: bool = True
+    channel_ref: Optional[str] = None
 
 
 class QueueOrderIn(BaseModel):
@@ -109,6 +112,12 @@ class QueueOrderIn(BaseModel):
 
 
 class SchedulerIn(BaseModel):
+    enabled: bool = False
+    interval_minutes: int = 60
+    auto_enqueue: bool = False
+
+
+class ChannelSchedulerIn(BaseModel):
     enabled: bool = False
     interval_minutes: int = 60
     auto_enqueue: bool = False
@@ -128,6 +137,49 @@ def _normalize_tags(raw):
             seen.add(t.lower())
             out.append(t)
     return out
+
+
+async def _migrate_channels():
+    """Однократная миграция: старый одиночный канал + scheduler → коллекция channels."""
+    if await db.channels.count_documents({}) > 0:
+        return
+    old = await db.app_config.find_one({"_id": "channel"})
+    if not old or not old.get("channel_id"):
+        return
+    sched = await db.app_config.find_one({"_id": "scheduler"}) or {}
+    ch = {
+        "id": str(uuid.uuid4()),
+        "channel_id": old.get("channel_id"),
+        "channel_title": old.get("channel_title"),
+        "channel_username": old.get("channel_username"),
+        "enabled": bool(sched.get("enabled")),
+        "interval_minutes": int(sched.get("interval_minutes") or 60),
+        "auto_enqueue": bool(sched.get("auto_enqueue")),
+        "next_run_at": sched.get("next_run_at"),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.channels.insert_one(ch)
+    # все посты без channel_ref привязываем к этому каналу
+    await db.posts.update_many({"channel_ref": {"$exists": False}}, {"$set": {"channel_ref": ch["id"]}})
+    await db.posts.update_many({"channel_ref": None}, {"$set": {"channel_ref": ch["id"]}})
+
+
+async def _resolve_channel(post: dict):
+    """Канал поста: по channel_ref, иначе первый канал (fallback)."""
+    ref = post.get("channel_ref")
+    ch = await db.channels.find_one({"id": ref}) if ref else None
+    if not ch:
+        ch = await db.channels.find_one({}, sort=[("created_at", 1)])
+    return ch
+
+
+async def _next_queue_order(channel_ref: str) -> int:
+    last = await db.posts.find_one(
+        {"in_queue": True, "channel_ref": channel_ref},
+        sort=[("queue_order", -1)], projection={"queue_order": 1},
+    )
+    return (last.get("queue_order") or 0) + 1 if last else 1
+
 
 
 def _compose_description(description, tags):
@@ -487,7 +539,7 @@ async def _finalize_native(post_id: str):
     published = False
     channel_title = None
     if post.get("publish_after"):
-        channel = await db.app_config.find_one({"_id": "channel"})
+        channel = await _resolve_channel({**post, **upd})
         if channel:
             try:
                 msg_ids = await _do_publish_native({**post, **upd}, channel)
@@ -507,16 +559,16 @@ async def _finalize_native(post_id: str):
 
 
 async def _maybe_auto_enqueue(post_id: str):
-    """Если включена авто-постановка в очередь — добавляет готовый неопубликованный пост в очередь."""
-    sched = await db.app_config.find_one({"_id": "scheduler"})
-    if not (sched and sched.get("auto_enqueue")):
-        return
-    post = await db.posts.find_one({"id": post_id}, {"status": 1, "published": 1, "in_queue": 1, "scheduled_at": 1})
+    """Авто-постановка в очередь, если у целевого канала поста включён auto_enqueue."""
+    post = await db.posts.find_one({"id": post_id}, {"status": 1, "published": 1, "in_queue": 1, "scheduled_at": 1, "channel_ref": 1})
     if not post or post.get("status") != "ready" or post.get("published") or post.get("in_queue") or post.get("scheduled_at"):
         return
-    last = await db.posts.find_one({"in_queue": True}, sort=[("queue_order", -1)], projection={"queue_order": 1})
-    order = (last.get("queue_order") or 0) + 1 if last else 1
-    await db.posts.update_one({"id": post_id}, {"$set": {"in_queue": True, "queue_order": order}})
+    channel = await _resolve_channel(post)
+    if not (channel and channel.get("auto_enqueue")):
+        return
+    ref = channel["id"]
+    order = await _next_queue_order(ref)
+    await db.posts.update_one({"id": post_id}, {"$set": {"in_queue": True, "queue_order": order, "channel_ref": ref}})
 
 
 async def _store_bytes(content: bytes, ctype: str, kind: str, filename: str):
@@ -615,10 +667,10 @@ async def _finalize_post(post_id: str):
     published = False
     channel_title = None
     if post.get("publish_after"):
-        channel = await db.app_config.find_one({"_id": "channel"})
+        merged = {**post, **upd}
+        channel = await _resolve_channel(merged)
         if channel:
             try:
-                merged = {**post, **upd}
                 msg_id = await _do_publish(merged, channel)
                 published = True
                 channel_title = channel.get("channel_title")
@@ -684,6 +736,7 @@ async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
         "scheduled_at": None,
         "in_queue": False,
         "queue_order": None,
+        "channel_ref": payload.channel_ref,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.posts.insert_one(doc)
@@ -783,7 +836,7 @@ async def _publish_and_store(post: dict) -> dict:
     """
     if post.get("status") in ("uploading", "processing", "failed"):
         raise ValueError("Пост ещё создаётся")
-    channel = await db.app_config.find_one({"_id": "channel"})
+    channel = await _resolve_channel(post)
     if not channel:
         raise ValueError("Канал не настроен")
     if post.get("post_type") == "native":
@@ -799,6 +852,7 @@ async def _publish_and_store(post: dict) -> dict:
         "published": True,
         "status": "published",
         "channel_title": channel.get("channel_title"),
+        "channel_ref": channel["id"],
         "scheduled_at": None,
         "in_queue": False,
         "error": None,
@@ -814,7 +868,7 @@ async def publish_post(post_id: str, user=Depends(auth.get_current_user)):
         raise HTTPException(status_code=404, detail="Пост не найден")
     if post.get("status") in ("uploading", "processing", "failed"):
         raise HTTPException(status_code=400, detail="Пост ещё создаётся, подождите")
-    channel = await db.app_config.find_one({"_id": "channel"})
+    channel = await _resolve_channel(post)
     if not channel:
         raise HTTPException(status_code=400, detail="Сначала настройте канал в настройках")
     try:
@@ -892,60 +946,127 @@ async def schedule_post(post_id: str, payload: ScheduleIn, user=Depends(auth.get
         iso = _parse_scheduled(payload.scheduled_at)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    await db.posts.update_one(
-        {"id": post_id},
-        {"$set": {"scheduled_at": iso, "in_queue": False, "published": False, "status": "ready"}},
-    )
+    fields = {"scheduled_at": iso, "in_queue": False, "published": False, "status": "ready"}
+    if payload.channel_ref:
+        fields["channel_ref"] = payload.channel_ref
+    await db.posts.update_one({"id": post_id}, {"$set": fields})
     return {"status": "scheduled", "scheduled_at": iso}
 
 
 @api_router.post("/posts/{post_id}/queue")
 async def queue_post(post_id: str, payload: QueueIn, user=Depends(auth.get_current_user)):
-    post = await db.posts.find_one({"id": post_id}, {"status": 1})
+    post = await db.posts.find_one({"id": post_id}, {"status": 1, "channel_ref": 1})
     if not post:
         raise HTTPException(status_code=404, detail="Пост не найден")
     if post.get("status") not in ("ready", "published"):
         raise HTTPException(status_code=400, detail="Пост ещё создаётся")
     if payload.in_queue:
-        last = await db.posts.find_one({"in_queue": True}, sort=[("queue_order", -1)], projection={"queue_order": 1})
-        order = (last.get("queue_order") or 0) + 1 if last else 1
+        ref = payload.channel_ref or post.get("channel_ref")
+        if not ref:
+            ch = await db.channels.find_one({}, sort=[("created_at", 1)])
+            if not ch:
+                raise HTTPException(status_code=400, detail="Сначала добавьте канал")
+            ref = ch["id"]
+        order = await _next_queue_order(ref)
         await db.posts.update_one(
             {"id": post_id},
-            {"$set": {"in_queue": True, "queue_order": order, "scheduled_at": None, "published": False, "status": "ready"}},
+            {"$set": {"in_queue": True, "queue_order": order, "channel_ref": ref,
+                      "scheduled_at": None, "published": False, "status": "ready"}},
         )
     else:
         await db.posts.update_one({"id": post_id}, {"$set": {"in_queue": False, "queue_order": None}})
     return {"status": "ok", "in_queue": payload.in_queue}
 
 
-@api_router.get("/settings/scheduler")
-async def get_scheduler(user=Depends(auth.get_current_user)):
-    cfg = await db.app_config.find_one({"_id": "scheduler"}, {"_id": 0}) or {"enabled": False, "interval_minutes": 60, "next_run_at": None, "auto_enqueue": False}
-    cfg.setdefault("auto_enqueue", False)
-    queue = await db.posts.find(
-        {"in_queue": True, "published": {"$ne": True}},
-        {"_id": 0, "id": 1, "title": 1, "status": 1, "queue_order": 1, "photo_count": 1, "video_count": 1, "cover_url": 1},
-    ).sort("queue_order", 1).to_list(500)
-    return {**cfg, "queue": queue, "queue_count": len(queue)}
+# ── Мультиканальность: управление каналами и их планами ──
+
+async def _channel_out(ch: dict) -> dict:
+    qcount = await db.posts.count_documents({"in_queue": True, "channel_ref": ch["id"], "published": {"$ne": True}})
+    return {
+        "id": ch["id"], "channel_id": ch.get("channel_id"), "channel_title": ch.get("channel_title"),
+        "channel_username": ch.get("channel_username"), "enabled": bool(ch.get("enabled")),
+        "interval_minutes": int(ch.get("interval_minutes") or 60), "auto_enqueue": bool(ch.get("auto_enqueue")),
+        "next_run_at": ch.get("next_run_at"), "queue_count": qcount,
+    }
 
 
-@api_router.put("/settings/scheduler")
-async def set_scheduler(payload: SchedulerIn, user=Depends(auth.get_current_user)):
+@api_router.get("/channels")
+async def list_channels(user=Depends(auth.get_current_user)):
+    await _migrate_channels()
+    chans = await db.channels.find({}).sort("created_at", 1).to_list(100)
+    return {"channels": [await _channel_out(c) for c in chans]}
+
+
+@api_router.post("/channels")
+async def add_channel(payload: ChannelIn, user=Depends(auth.get_current_user)):
+    if not os.environ.get("TELEGRAM_BOT_TOKEN"):
+        raise HTTPException(status_code=400, detail="Не задан TELEGRAM_BOT_TOKEN на сервере")
+    try:
+        chat = await telegram_api.get_chat(payload.identifier.strip())
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Не удалось получить канал: {e}. Бот должен быть админом.")
+    existing = await db.channels.find_one({"channel_id": chat["id"]})
+    if existing:
+        raise HTTPException(status_code=400, detail="Этот канал уже добавлен")
+    title = chat.get("title") or chat.get("username") or str(chat.get("id"))
+    ch = {
+        "id": str(uuid.uuid4()), "channel_id": chat["id"], "channel_title": title,
+        "channel_username": chat.get("username"), "enabled": False, "interval_minutes": 60,
+        "auto_enqueue": False, "next_run_at": None, "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.channels.insert_one(ch)
+    return await _channel_out(ch)
+
+
+@api_router.put("/channels/{ch_id}")
+async def update_channel(ch_id: str, payload: ChannelSchedulerIn, user=Depends(auth.get_current_user)):
+    ch = await db.channels.find_one({"id": ch_id})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Канал не найден")
     interval = max(1, int(payload.interval_minutes))
     upd = {"enabled": bool(payload.enabled), "interval_minutes": interval, "auto_enqueue": bool(payload.auto_enqueue)}
-    if payload.enabled:
-        upd["next_run_at"] = (datetime.now(timezone.utc) + timedelta(minutes=interval)).isoformat()
-    else:
-        upd["next_run_at"] = None
-    await db.app_config.update_one({"_id": "scheduler"}, {"$set": upd}, upsert=True)
-    return upd
+    upd["next_run_at"] = (datetime.now(timezone.utc) + timedelta(minutes=interval)).isoformat() if payload.enabled else None
+    await db.channels.update_one({"id": ch_id}, {"$set": upd})
+    return await _channel_out({**ch, **upd})
 
 
-@api_router.put("/settings/scheduler/queue")
-async def reorder_queue(payload: QueueOrderIn, user=Depends(auth.get_current_user)):
-    for i, pid in enumerate(payload.order):
-        await db.posts.update_one({"id": pid, "in_queue": True}, {"$set": {"queue_order": i + 1}})
+@api_router.delete("/channels/{ch_id}")
+async def delete_channel(ch_id: str, user=Depends(auth.get_current_user)):
+    await db.channels.delete_one({"id": ch_id})
+    await db.posts.update_many({"channel_ref": ch_id, "in_queue": True}, {"$set": {"in_queue": False, "queue_order": None}})
     return {"status": "ok"}
+
+
+@api_router.get("/channels/{ch_id}/queue")
+async def channel_queue(ch_id: str, user=Depends(auth.get_current_user)):
+    queue = await db.posts.find(
+        {"in_queue": True, "channel_ref": ch_id, "published": {"$ne": True}},
+        {"_id": 0, "id": 1, "title": 1, "status": 1, "queue_order": 1, "photo_count": 1, "video_count": 1, "cover_url": 1},
+    ).sort("queue_order", 1).to_list(500)
+    return {"queue": queue, "queue_count": len(queue)}
+
+
+@api_router.put("/channels/{ch_id}/queue")
+async def reorder_channel_queue(ch_id: str, payload: QueueOrderIn, user=Depends(auth.get_current_user)):
+    for i, pid in enumerate(payload.order):
+        await db.posts.update_one({"id": pid, "in_queue": True, "channel_ref": ch_id}, {"$set": {"queue_order": i + 1}})
+    return {"status": "ok"}
+
+
+@api_router.post("/channels/{ch_id}/publish-all")
+async def channel_publish_all(ch_id: str, user=Depends(auth.get_current_user)):
+    ch = await db.channels.find_one({"id": ch_id})
+    if not ch:
+        raise HTTPException(status_code=404, detail="Канал не найден")
+    rows = await db.posts.find(
+        {"status": "ready", "published": {"$ne": True}, "scheduled_at": None, "channel_ref": ch_id},
+        {"id": 1},
+    ).sort([("in_queue", -1), ("queue_order", 1), ("created_at", 1)]).to_list(2000)
+    ids = [r["id"] for r in rows]
+    if not ids:
+        raise HTTPException(status_code=400, detail="Нет готовых постов для этого канала")
+    asyncio.create_task(_publish_all_task(ids))
+    return {"started": len(ids)}
 
 
 @api_router.delete("/posts/{post_id}")
@@ -1291,13 +1412,11 @@ app.add_middleware(
 
 
 async def _scheduler_tick():
+    await _migrate_channels()
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
-    channel = await db.app_config.find_one({"_id": "channel"})
-    if not channel:
-        return  # без канала публиковать некуда
 
-    # (A) Посты с точным временем публикации, срок которых наступил.
+    # (A) Посты с точным временем публикации, срок которых наступил (любой канал).
     due = await db.posts.find({
         "scheduled_at": {"$ne": None, "$lte": now_iso},
         "status": "ready",
@@ -1311,26 +1430,26 @@ async def _scheduler_tick():
             logger.warning("scheduled publish failed %s: %s", post.get("id"), e)
             await db.posts.update_one({"id": post["id"]}, {"$set": {"scheduled_at": None, "error": f"Отложенная публикация не удалась: {e}"}})
 
-    # (B) Очередь-«капельница»: один пост за интервал.
-    sched = await db.app_config.find_one({"_id": "scheduler"})
-    if sched and sched.get("enabled"):
-        next_run = sched.get("next_run_at")
-        if not next_run or now_iso >= next_run:
-            interval = max(1, int(sched.get("interval_minutes") or 60))
-            post = await db.posts.find_one(
-                {"in_queue": True, "status": "ready", "published": {"$ne": True}},
-                sort=[("queue_order", 1)],
-            )
-            if post:
-                try:
-                    await _publish_and_store(post)
-                    logger.info("queue published %s", post["id"])
-                except Exception as e:
-                    logger.warning("queue publish failed %s: %s", post.get("id"), e)
-                    await db.posts.update_one({"id": post["id"]}, {"$set": {"in_queue": False, "queue_order": None, "error": f"Публикация из очереди не удалась: {e}"}})
-            # Держим ритм: следующий слот через интервал (даже если очередь пуста).
-            new_next = (now + timedelta(minutes=interval)).isoformat()
-            await db.app_config.update_one({"_id": "scheduler"}, {"$set": {"next_run_at": new_next}}, upsert=True)
+    # (B) Очередь-«капельница» — по одному посту за интервал для КАЖДОГО канала.
+    channels = await db.channels.find({"enabled": True}).to_list(100)
+    for ch in channels:
+        next_run = ch.get("next_run_at")
+        if next_run and now_iso < next_run:
+            continue
+        interval = max(1, int(ch.get("interval_minutes") or 60))
+        post = await db.posts.find_one(
+            {"in_queue": True, "status": "ready", "published": {"$ne": True}, "channel_ref": ch["id"]},
+            sort=[("queue_order", 1)],
+        )
+        if post:
+            try:
+                await _publish_and_store(post)
+                logger.info("queue published %s -> %s", post["id"], ch.get("channel_title"))
+            except Exception as e:
+                logger.warning("queue publish failed %s: %s", post.get("id"), e)
+                await db.posts.update_one({"id": post["id"]}, {"$set": {"in_queue": False, "queue_order": None, "error": f"Публикация из очереди не удалась: {e}"}})
+        # Держим ритм канала: следующий слот через интервал (даже если очередь пуста).
+        await db.channels.update_one({"id": ch["id"]}, {"$set": {"next_run_at": (now + timedelta(minutes=interval)).isoformat()}})
 
 
 async def _scheduler_loop():
