@@ -77,7 +77,13 @@ export default function EditPost() {
   }, [id, navigate]);
 
   const setCover = (idx) =>
-    setMedia((prev) => prev.map((m) => ({ ...m, is_cover: m.kind === "photo" && m.idx === idx })));
+    setMedia((prev) => {
+      const target = prev.find((m) => m.idx === idx);
+      const willEnable = !target?.is_cover;
+      const coversCount = prev.filter((m) => m.is_cover && m.kind === "photo").length;
+      if (willEnable && coversCount >= 3) { toast.error("Можно не больше 3 обложек"); return prev; }
+      return prev.map((m) => (m.idx === idx ? { ...m, is_cover: m.kind === "photo" ? willEnable : false } : m));
+    });
   const updCaption = (idx, caption) =>
     setMedia((prev) => prev.map((m) => (m.idx === idx ? { ...m, caption } : m)));
   const removeMedia = (idx) =>

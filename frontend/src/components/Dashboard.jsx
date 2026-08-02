@@ -109,7 +109,6 @@ export default function Dashboard() {
   const { jobs, retryJob, dismissJob } = useUpload();
   const [stats, setStats] = useState(null);
   const [posts, setPosts] = useState([]);
-  const [channel, setChannel] = useState(null);
   const [loading, setLoading] = useState(true);
   const [publishing, setPublishing] = useState(null);
   const [channelOpen, setChannelOpen] = useState(false);
@@ -120,11 +119,26 @@ export default function Dashboard() {
   const [scheduleSaving, setScheduleSaving] = useState(false);
   const [scheduleChannel, setScheduleChannel] = useState("");
   const [channels, setChannels] = useState([]);
+  const [channelsLoaded, setChannelsLoaded] = useState(false);
+  const [selectedChannel, setSelectedChannel] = useState(localStorage.getItem("selected_channel") || "");
 
+  const loadChannels = useCallback(() => {
+    api.get("/channels").then(({ data }) => {
+      const list = data.channels || [];
+      setChannels(list);
+      setChannelsLoaded(true);
+      setSelectedChannel((cur) => (list.some((c) => c.id === cur) ? cur : (list.length === 1 ? list[0].id : "")));
+    }).catch(() => setChannelsLoaded(true));
+  }, []);
+
+  useEffect(() => { loadChannels(); }, [loadChannels, schedulerOpen]);
   useEffect(() => {
-    api.get("/channels").then(({ data }) => setChannels(data.channels || [])).catch(() => {});
-  }, [schedulerOpen]);
+    if (selectedChannel) localStorage.setItem("selected_channel", selectedChannel);
+    else localStorage.removeItem("selected_channel");
+  }, [selectedChannel]);
+
   const chanName = (ref) => channels.find((c) => c.id === ref)?.channel_title;
+  const currentChannel = channels.find((c) => c.id === selectedChannel);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [qInput, setQInput] = useState("");
@@ -139,22 +153,21 @@ export default function Dashboard() {
   const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
+    if (!selectedChannel) { setLoading(false); return; }
     try {
-      const [s, p, c] = await Promise.all([
-        api.get("/stats"),
-        api.get(`/posts?page=${page}&page_size=20&q=${encodeURIComponent(q)}&sort_by=${sortBy}&sort_dir=${sortDir}`),
-        api.get("/settings"),
+      const [s, p] = await Promise.all([
+        api.get(`/stats?channel_ref=${selectedChannel}`),
+        api.get(`/posts?page=${page}&page_size=20&q=${encodeURIComponent(q)}&sort_by=${sortBy}&sort_dir=${sortDir}&channel_ref=${selectedChannel}`),
       ]);
       setStats(s.data);
       setPosts(p.data.items);
       setTotalPages(p.data.pages);
-      setChannel(c.data.channel_id ? c.data : null);
     } catch (e) {
       // 401 handled by interceptor
     } finally {
       setLoading(false);
     }
-  }, [page, q, sortBy, sortDir]);
+  }, [page, q, sortBy, sortDir, selectedChannel]);
 
   useEffect(() => {
     const t = setTimeout(() => { setQ(qInput); setPage(1); }, 400);
@@ -188,10 +201,10 @@ export default function Dashboard() {
 
   const doPublishAll = async () => {
     setConfirmAll(false);
-    if (!channel) { toast.error("Сначала настройте канал"); setChannelOpen(true); return; }
+    if (!selectedChannel) { toast.error("Сначала выберите канал"); return; }
     setPublishingAll(true);
     try {
-      const { data } = await api.post("/posts/publish-all");
+      const { data } = await api.post(`/channels/${selectedChannel}/publish-all`);
       toast.success(`Публикуется ${data.started} постов — по одному раз в 5 секунд`);
       load();
     } catch (err) {
@@ -381,6 +394,29 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {selectedChannel && channels.length > 0 && (
+              <>
+                <div className="flex items-center gap-2 mr-1 pr-2 border-r border-zinc-200" data-testid="header-channel-box">
+                  <Layers className="h-4 w-4 text-[#0055FF]" />
+                  <select
+                    value={selectedChannel}
+                    onChange={(e) => { setSelectedChannel(e.target.value); setPage(1); }}
+                    className="py-2 px-2 border border-zinc-200 text-sm outline-none focus:border-[#0055FF] bg-white max-w-[180px] font-semibold"
+                    data-testid="header-channel-select"
+                  >
+                    {channels.map((c) => <option key={c.id} value={c.id}>{c.channel_title}</option>)}
+                  </select>
+                  <button
+                    onClick={() => { setSelectedChannel(""); setPage(1); }}
+                    className="text-xs text-zinc-400 hover:text-[#0055FF] whitespace-nowrap"
+                    title="Сменить канал"
+                    data-testid="change-channel-btn"
+                  >
+                    сменить
+                  </button>
+                </div>
+              </>
+            )}
             <Button onClick={() => setSchedulerOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="scheduler-settings-btn">
               <CalendarClock className="h-4 w-4 mr-2" /> Каналы и план
             </Button>
@@ -397,11 +433,70 @@ export default function Dashboard() {
         </div>
       </header>
 
+      {channelsLoaded && !selectedChannel && (
+        <main className="max-w-4xl mx-auto px-6 py-16" data-testid="channel-gate">
+          {channels.length === 0 ? (
+            <div className="bg-white border border-zinc-200 p-16 text-center">
+              <Radio className="h-12 w-12 text-zinc-300 mx-auto mb-5" />
+              <h1 className="text-3xl font-black tracking-tighter mb-2">Каналов пока нет</h1>
+              <p className="text-zinc-500 max-w-md mx-auto mb-6">Добавьте Telegram-канал, чтобы начать создавать и публиковать посты. Бот должен быть администратором канала.</p>
+              <Button onClick={() => setSchedulerOpen(true)} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="gate-add-channel-btn">
+                <Plus className="h-4 w-4 mr-2" /> Добавить канал
+              </Button>
+            </div>
+          ) : (
+            <div>
+              <div className="mb-8">
+                <span className="label-caps text-zinc-400">Начало работы</span>
+                <h1 className="text-4xl sm:text-5xl font-black tracking-tighter mt-2">Выберите канал</h1>
+                <p className="text-zinc-500 mt-2 max-w-2xl">Выберите канал, с которым будете работать. Статистика и список постов будут показаны только для него.</p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {channels.map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => { setSelectedChannel(c.id); setPage(1); }}
+                    className="text-left bg-white border-2 border-zinc-200 p-6 hover:border-[#0055FF] hover:shadow-sm transition-all duration-150 group"
+                    data-testid={`gate-channel-${c.id}`}
+                  >
+                    <div className="flex items-center gap-3 mb-3">
+                      <div className="h-11 w-11 bg-[#0055FF] flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform duration-150">
+                        <Radio className="h-5 w-5 text-white" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="font-bold tracking-tight truncate">{c.channel_title}</p>
+                        {c.channel_username && <p className="text-xs text-zinc-400 truncate">@{c.channel_username}</p>}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-zinc-500">
+                      <span className={`inline-flex items-center gap-1 ${c.enabled ? "text-[#00CC66]" : "text-zinc-400"}`}>
+                        <span className={`h-2 w-2 rounded-full ${c.enabled ? "bg-[#00CC66]" : "bg-zinc-300"}`} />
+                        {c.enabled ? "Авто-публикация вкл" : "Авто-публикация выкл"}
+                      </span>
+                    </div>
+                  </button>
+                ))}
+                <button
+                  onClick={() => setSchedulerOpen(true)}
+                  className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-zinc-300 p-6 text-zinc-500 hover:border-[#0055FF] hover:text-[#0055FF] transition-colors duration-150 min-h-[132px]"
+                  data-testid="gate-manage-channels-btn"
+                >
+                  <Plus className="h-6 w-6" />
+                  <span className="text-sm font-semibold">Добавить / управлять каналами</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </main>
+      )}
+
+      {selectedChannel && (
       <main className="max-w-7xl mx-auto px-6 py-8">
         <div className="flex items-start justify-between mb-8 gap-4 flex-wrap">
           <div>
-            <h1 className="text-4xl sm:text-5xl font-black tracking-tighter">Панель постов</h1>
-            <p className="text-zinc-500 mt-2 max-w-2xl">Создавайте статьи Telegraph с медиа и публикуйте их в канал прямо отсюда.</p>
+            <span className="label-caps text-zinc-400" data-testid="current-channel-name">Канал: {currentChannel?.channel_title || "—"}</span>
+            <h1 className="text-4xl sm:text-5xl font-black tracking-tighter mt-1">Панель постов</h1>
+            <p className="text-zinc-500 mt-2 max-w-2xl">Статистика и посты показаны только для выбранного канала. Сменить канал можно в шапке.</p>
           </div>
           <div className="flex items-center gap-2">
             <Button onClick={() => navigate("/new")} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="new-post-btn">
@@ -410,11 +505,12 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
           <StatCard label="Всего постов" value={stats?.total_posts ?? "—"} icon={FileText} testid="stat-total" />
           <StatCard label="Опубликовано" value={stats?.total_published ?? "—"} icon={Radio} accent="#00CC66" testid="stat-published" />
           <StatCard label="Черновики" value={stats?.total_drafts ?? "—"} icon={FileText} accent="#FF3333" testid="stat-drafts" />
           <StatCard label="Медиа-файлов" value={stats?.total_media ?? "—"} icon={ImageIcon} accent="#0055FF" testid="stat-media" />
+          <StatCard label="В очереди" value={stats?.in_queue ?? "—"} icon={ListPlus} accent="#D97706" testid="stat-queue" />
         </div>
 
         {jobs.length > 0 && (
@@ -491,7 +587,7 @@ export default function Dashboard() {
                   data-testid="posts-search"
                 />
               </div>
-              <span className="text-sm text-zinc-400 whitespace-nowrap">{channels.length ? `Каналов: ${channels.length}` : "Нет каналов"}</span>
+              <span className="text-sm text-zinc-400 whitespace-nowrap" data-testid="table-channel-label">В канале: {currentChannel?.channel_title || "—"}</span>
             </div>
           </div>
 
@@ -660,6 +756,7 @@ export default function Dashboard() {
           )}
         </div>
       </main>
+      )}
     </div>
   );
 }

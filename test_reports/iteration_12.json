@@ -1,0 +1,29 @@
+{
+  "summary": "Verified NEW FEATURES (Russian problem statement): (1) channel-gate + channel-filtered dashboard + header channel switcher + persistence via localStorage; (2) cover up to 3 photos in PostEditor and toggle up to 3 in EditPost. Backend: created /app/backend/tests/test_channel_filter_and_covers.py (8 tests) — all PASS. Frontend E2E through preview URL: channel-gate shows both channels (gate-channel-chan-alpha, gate-channel-chan-beta); clicking Alpha shows stat-total=3, stat-published=1, stat-drafts=2, stat-queue=1, stat-media=3 and only seed-a1/a2/a3 rows; header-channel-select switches to Beta (stat-total=1, only seed-b1); 'сменить' (change-channel-btn) clears localStorage and returns to channel-gate; after selecting Alpha and reloading, gate is skipped (persistence OK). PostEditor /new: editor-channel defaults to chan-alpha, adding 3 photos via cover-file-input creates cover-item-0..2 and hides cover-dropzone (4th prevented); cover-remove-1 removes middle and dropzone reappears. EditPost /edit/seed-b1: edit-channel selector present with value chan-beta (native post).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/test_channel_filter_and_covers.py",
+    "/app/backend/tests/seed_channel_filter.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is now ~1620 lines — post_type/channel_ref branches keep growing. Split into routers (posts, channels, media, settings) is overdue.",
+    "_do_publish silently falls back from send_photo_album to sendPhoto/sendMessage on exception with only a warning log — the user has no indication that the album path failed and a fallback single-photo was posted instead. Consider surfacing this via post.error field.",
+    "GET /api/stats?channel_ref=chan-x accepts arbitrary channel_ref without validating that the channel exists — a stale value in localStorage would silently return zeros instead of 400/404, but this is minor since the UX self-corrects via the gate.",
+    "Dashboard header select uses a native <select> with a fixed max-w-[180px]; long channel_title values get clipped without a tooltip. Cosmetic.",
+    "Frontend still uses deprecated @app.on_event('startup') (pre-existing).",
+    "PostEditor sends covers first with is_cover:true (server ordering relies on that) and photos with is_cover:false — matches _split_media which further caps covers[:3]; consistent, no issue."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_channel_filter_and_covers.py",
+    "/app/backend/tests/seed_channel_filter.py"
+  ],
+  "success_rate": {"backend": "100% (8/8)", "frontend": "100% (gate, filtering, switcher, persistence, PostEditor cover 3, EditPost channel selector — all verified)"},
+  "test_credentials": "admin@mediabot.local / admin123 (from /app/memory/test_credentials.md)",
+  "seed_data_creation": "Inserted channels chan-alpha (Канал Альфа), chan-beta (Канал Бета) and 4 posts (seed-a1 published, seed-a2 draft, seed-a3 queued alpha; seed-b1 native beta) via /app/backend/tests/seed_channel_filter.py. TEST_cover_urls temporary post is created and deleted inside the test fixture.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Seed data still present in DB after this run: 2 channels (chan-alpha, chan-beta) and 4 posts (seed-a1..a3, seed-b1). Re-run /app/backend/tests/seed_channel_filter.py to reset if needed. Backend tests: TestStatsScoped (alpha/beta/global), TestPostsScoped (alpha 3 rows, beta 1 row, channel_ref filter), TestCoverUrls (edit_post caps cover_urls at 3), TestPublishAlbumPath (_do_publish uses send_photo_album for 2-3 covers via monkey-patching telegram_api; falls back to send_photo for 1 cover). Frontend E2E covered channel-gate → Alpha filter → header select → beta filter → сменить → persistence → PostEditor cover 3 + max enforce + remove → EditPost channel selector. Real Telegram publishing not tested (no bot token; documented in problem statement). Note: the login form fields do NOT use type='email'; use data-testid='login-email' / 'login-password' / 'login-submit'."
+}

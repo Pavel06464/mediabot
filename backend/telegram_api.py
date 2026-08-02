@@ -288,3 +288,30 @@ async def send_media_group_files(chat_id, items: list):
                 fh.close()
             except Exception:
                 pass
+
+
+
+async def send_photo_album(chat_id, urls: list, caption: str):
+    """Скачивает 2-3 фото-обложки и отправляет альбомом (media group) с подписью на первом.
+
+    Используется как «обложка до 3 фото» для Telegraph-постов вместо одного большого превью.
+    Возвращает список сообщений Telegram.
+    """
+    paths = []
+    try:
+        items = []
+        for i, u in enumerate(urls):
+            p = await _download_to_temp(u)
+            paths.append(p)
+            fn, mime = _guess("photo", u)
+            it = {"type": "photo", "path": p, "filename": fn, "mime": mime}
+            if i == 0 and caption:
+                it["caption"] = caption
+            items.append(it)
+        return await send_media_group_files(chat_id, items)
+    finally:
+        for p in paths:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass

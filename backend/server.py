@@ -221,19 +221,25 @@ async def root():
 
 # ---------- Stats ----------
 @api_router.get("/stats")
-async def get_stats(user=Depends(auth.get_current_user)):
-    total_posts = await db.posts.count_documents({})
-    total_published = await db.posts.count_documents({"published": True})
-    pipeline = [{"$group": {"_id": None, "media": {"$sum": "$media_count"}}}]
+async def get_stats(channel_ref: str = "", user=Depends(auth.get_current_user)):
+    base = {}
+    if channel_ref and channel_ref.strip():
+        base = {"channel_ref": channel_ref.strip()}
+    total_posts = await db.posts.count_documents(base)
+    total_published = await db.posts.count_documents({**base, "published": True})
+    pipeline = [{"$match": base}] if base else []
+    pipeline.append({"$group": {"_id": None, "media": {"$sum": "$media_count"}}})
     agg = await db.posts.aggregate(pipeline).to_list(1)
     total_media = agg[0]["media"] if agg else 0
-    channel = await db.app_config.find_one({"_id": "channel"})
+    in_queue = await db.posts.count_documents({**base, "in_queue": True, "published": {"$ne": True}})
+    channels_count = await db.channels.count_documents({})
     return {
         "total_posts": total_posts,
         "total_published": total_published,
         "total_drafts": total_posts - total_published,
         "total_media": total_media,
-        "channels_configured": 1 if channel else 0,
+        "in_queue": in_queue,
+        "channels_configured": channels_count,
     }
 
 
@@ -241,12 +247,15 @@ async def get_stats(user=Depends(auth.get_current_user)):
 @api_router.get("/posts")
 async def get_posts(page: int = 1, page_size: int = 20, q: str = "",
                     sort_by: str = "date", sort_dir: str = "desc",
+                    channel_ref: str = "",
                     user=Depends(auth.get_current_user)):
     page = max(1, page)
     page_size = min(100, max(1, page_size))
     query = {}
     if q and q.strip():
         query["title"] = {"$regex": re.escape(q.strip()), "$options": "i"}
+    if channel_ref and channel_ref.strip():
+        query["channel_ref"] = channel_ref.strip()
     total = await db.posts.count_documents(query)
     skip = (page - 1) * page_size
     direction = 1 if sort_dir == "asc" else -1
@@ -385,6 +394,7 @@ async def create_post(payload: PostIn, user=Depends(auth.get_current_user)):
         "telegraph_url": url,
         "telegraph_path": path,
         "cover_url": cover_url,
+        "cover_urls": _cover_urls(blocks),
         "media_count": sum(1 for b in blocks if b["type"] in ("photo", "video")),
         "media_ids": media_ids,
         "r2_keys": r2_keys,
@@ -400,14 +410,27 @@ async def create_post(payload: PostIn, user=Depends(auth.get_current_user)):
 
 
 def _split_media(blocks):
-    """Разбивает блоки на текст / фото / видео и определяет обложку (первое is_cover фото)."""
+    """Разбивает блоки на текст / фото / видео и определяет обложки (до 3 is_cover фото)."""
     text_blocks = [b for b in blocks if b.get("type") == "text" and (b.get("value") or "").strip()]
     photos = [b for b in blocks if b.get("type") == "photo" and b.get("url")]
     videos = [b for b in blocks if b.get("type") == "video" and b.get("url")]
-    cover = next((b for b in photos if b.get("is_cover")), None) or (photos[0] if photos else None)
-    if cover and photos:
-        photos = [cover] + [b for b in photos if b is not cover]
+    covers = [b for b in photos if b.get("is_cover")][:3]
+    if covers:
+        photos = covers + [b for b in photos if not any(b is c for c in covers)]
+        cover = covers[0]
+    else:
+        cover = photos[0] if photos else None
     return text_blocks, photos, videos, cover
+
+
+def _cover_urls(blocks):
+    """Список URL обложек (до 3 отмеченных is_cover фото). Если ни одна не отмечена — первое фото."""
+    covers = [b for b in blocks if b.get("type") == "photo" and b.get("is_cover") and b.get("url")][:3]
+    if not covers:
+        first = next((b for b in blocks if b.get("type") == "photo" and b.get("url")), None)
+        return [first["url"]] if first else []
+    return [c["url"] for c in covers]
+
 
 
 _LINK_RE = re.compile(r'\[([^\]]+)\]\((https?://[^)\s]+)\)')
@@ -485,16 +508,24 @@ def _channel_post_url(channel: dict, message_id) -> Optional[str]:
 
 async def _do_publish(post: dict, channel: dict):
     caption = _publish_caption(post)
-    res = None
-    if post.get("cover_url"):
+    cover_urls = (post.get("cover_urls") or ([post["cover_url"]] if post.get("cover_url") else []))[:3]
+    # 2-3 обложки → альбом (media group) с подписью на первом
+    if len(cover_urls) >= 2:
         try:
-            res = await telegram_api.send_photo(channel["channel_id"], post["cover_url"], caption)
+            msgs = await telegram_api.send_photo_album(channel["channel_id"], cover_urls, caption)
+            return [(m or {}).get("message_id") for m in (msgs or [])]
+        except Exception as e:
+            logger.warning("cover album failed, fallback to single/message: %s", e)
+    if cover_urls:
+        try:
+            res = await telegram_api.send_photo(channel["channel_id"], cover_urls[0], caption)
         except Exception as e:
             logger.warning("sendPhoto failed, fallback to sendMessage: %s", e)
             res = await telegram_api.send_message(channel["channel_id"], caption)
     else:
         res = await telegram_api.send_message(channel["channel_id"], caption)
-    return (res or {}).get("message_id")
+    mid = (res or {}).get("message_id")
+    return [mid] if mid else []
 
 
 def _native_caption(post: dict) -> str:
@@ -609,6 +640,7 @@ async def _finalize_native(post_id: str):
         "photos_url": None,
         "videos_url": None,
         "cover_url": cover["url"] if cover else None,
+        "cover_urls": _cover_urls(blocks),
         "media_ids": media_ids,
         "status": "ready",
     }
@@ -737,6 +769,7 @@ async def _finalize_post(post_id: str):
         "videos_path": videos_path,
         "videos_paths": videos_paths,
         "cover_url": cover["url"] if cover else None,
+        "cover_urls": _cover_urls(blocks),
         "media_ids": media_ids,
         "status": "ready",
     }
@@ -747,11 +780,12 @@ async def _finalize_post(post_id: str):
         channel = await _resolve_channel(merged)
         if channel:
             try:
-                msg_id = await _do_publish(merged, channel)
+                msg_ids = await _do_publish(merged, channel)
                 published = True
                 channel_title = channel.get("channel_title")
-                upd["channel_message_id"] = msg_id
-                upd["channel_post_url"] = _channel_post_url(channel, msg_id)
+                upd["channel_message_ids"] = msg_ids
+                upd["channel_message_id"] = msg_ids[0] if msg_ids else None
+                upd["channel_post_url"] = _channel_post_url(channel, msg_ids[0] if msg_ids else None)
                 upd["status"] = "published"
             except Exception as e:
                 logger.warning("auto-publish failed: %s", e)
@@ -922,8 +956,9 @@ async def _publish_and_store(post: dict) -> dict:
     else:
         if not post.get("telegraph_url"):
             raise ValueError("Статья ещё создаётся")
-        msg_id = await _do_publish(post, channel)
-        set_fields = {"channel_message_id": msg_id, "channel_post_url": _channel_post_url(channel, msg_id)}
+        msg_ids = await _do_publish(post, channel)
+        set_fields = {"channel_message_ids": msg_ids, "channel_message_id": msg_ids[0] if msg_ids else None,
+                      "channel_post_url": _channel_post_url(channel, msg_ids[0] if msg_ids else None)}
     set_fields.update({
         "published": True,
         "status": "published",
@@ -1291,6 +1326,7 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
                 "hashtags": tags,
                 "channel_ref": payload.channel_ref or post.get("channel_ref"),
                 "cover_url": cover["url"] if cover else None,
+                "cover_urls": _cover_urls(blocks),
                 "media_ids": media_ids,
                 "r2_keys": r2_keys,
                 "photo_count": len(photos),
@@ -1352,6 +1388,7 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
             "videos_path": videos_paths[0] if videos_paths else None,
             "videos_paths": videos_paths,
             "cover_url": cover["url"] if cover else None,
+            "cover_urls": _cover_urls(blocks),
             "media_ids": media_ids,
             "r2_keys": r2_keys,
             "photo_count": len(photos),

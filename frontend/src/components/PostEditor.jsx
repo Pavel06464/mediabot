@@ -58,7 +58,7 @@ export default function PostEditor() {
   const [description, setDescription] = useState("");
   const [hashtags, setHashtags] = useState([]);
   const descRef = useRef(null);
-  const [cover, setCover] = useState(null); // {file, localUrl}
+  const [covers, setCovers] = useState([]); // до 3 обложек: {id, file, localUrl}
   const [photos, setPhotos] = useState([]);
   const [videos, setVideos] = useState([]);
   const [publishAfter, setPublishAfter] = useState(false);
@@ -84,8 +84,10 @@ export default function PostEditor() {
   useEffect(() => {
     api.get("/hashtags/popular?limit=5").then(({ data }) => setPopularTags((data.tags || []).map((t) => t.tag))).catch(() => {});
     api.get("/channels").then(({ data }) => {
-      setChannels(data.channels || []);
-      if (data.channels?.length) setChannelRef(data.channels[0].id);
+      const list = data.channels || [];
+      setChannels(list);
+      const preferred = localStorage.getItem("selected_channel");
+      if (list.length) setChannelRef(list.some((c) => c.id === preferred) ? preferred : list[0].id);
     }).catch(() => {});
     loadSignatures();
   }, [loadSignatures]);
@@ -103,9 +105,15 @@ export default function PostEditor() {
   }, [title]);
 
   const onCover = useCallback((files) => {
-    const f = files[0];
-    setCover({ file: f, localUrl: URL.createObjectURL(f) });
+    setCovers((prev) => {
+      const room = 3 - prev.length;
+      if (room <= 0) { toast.error("Можно не больше 3 обложек"); return prev; }
+      const add = files.slice(0, room).map((f) => ({ id: nid(), file: f, localUrl: URL.createObjectURL(f) }));
+      if (files.length > room) toast.info("Добавлено 3 обложки (максимум)");
+      return [...prev, ...add];
+    });
   }, []);
+  const removeCover = (id) => setCovers((prev) => prev.filter((c) => c.id !== id));
   const addMedia = useCallback(async (files, kind) => {
     if (kind === "video") {
       setVideos((prev) => [...prev, ...files.map((f) => ({ id: nid(), file: f, localUrl: URL.createObjectURL(f), caption: "" }))]);
@@ -137,15 +145,15 @@ export default function PostEditor() {
 
   const create = () => {
     if (!title.trim()) return toast.error("Укажите заголовок");
-    if (!cover && !photos.length && !videos.length && !description.trim())
+    if (!covers.length && !photos.length && !videos.length && !description.trim())
       return toast.error("Добавьте обложку, медиа или описание");
-    if (publishAfter && postType === "telegraph" && !cover && !photos.length)
+    if (publishAfter && postType === "telegraph" && !covers.length && !photos.length)
       return toast.error("Для публикации Telegraph-поста добавьте хотя бы одно фото (обложку)");
-    if (publishAfter && postType === "native" && !cover && !photos.length && !videos.length)
+    if (publishAfter && postType === "native" && !covers.length && !photos.length && !videos.length)
       return toast.error("Для публикации добавьте хотя бы одно медиа");
 
     const items = [];
-    if (cover?.file) items.push({ kind: "photo", is_cover: true, caption: "", file: cover.file });
+    covers.forEach((c) => items.push({ kind: "photo", is_cover: true, caption: "", file: c.file }));
     photos.forEach((p) => items.push({ kind: "photo", is_cover: false, caption: p.caption, file: p.file }));
     videos.forEach((v) => items.push({ kind: "video", is_cover: false, caption: v.caption, file: v.file }));
 
@@ -201,20 +209,26 @@ export default function PostEditor() {
           <div className="flex items-center gap-2 mb-3">
             <Star className="h-4 w-4 text-[#0055FF]" fill="#0055FF" />
             <h2 className="text-lg font-bold tracking-tight">Обложка / превью</h2>
-            <span className="text-sm text-zinc-400">— 1 фото, большой предпросмотр в канале</span>
+            <span className="text-sm text-zinc-400">— до 3 фото. Одно фото — большой предпросмотр, 2–3 — альбом в канале</span>
           </div>
-          {cover ? (
-            <div className="relative bg-white border border-zinc-200 p-2">
-              <img src={cover.localUrl} alt="cover" className="max-h-64 w-full object-contain bg-zinc-50" />
-              <button onClick={() => setCover(null)} className="absolute top-3 right-3 bg-white border border-zinc-200 p-1.5 text-zinc-500 hover:text-[#FF3333]" data-testid="cover-remove">
-                <Trash2 className="h-4 w-4" />
-              </button>
+          {covers.length > 0 && (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3" data-testid="covers-list">
+              {covers.map((c, i) => (
+                <div key={c.id} className="relative bg-white border border-zinc-200 p-2" data-testid={`cover-item-${i}`}>
+                  <img src={c.localUrl} alt="cover" className="h-40 w-full object-contain bg-zinc-50" />
+                  <span className="absolute top-3 left-3 bg-[#0055FF] text-white text-[11px] font-bold px-1.5 py-0.5">{i + 1}</span>
+                  <button onClick={() => removeCover(c.id)} className="absolute top-3 right-3 bg-white border border-zinc-200 p-1.5 text-zinc-500 hover:text-[#FF3333]" data-testid={`cover-remove-${i}`}>
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+              ))}
             </div>
-          ) : (
-            <Dropzone accept="image/*" multiple={false} onFiles={onCover} testid="cover-dropzone" inputTestid="cover-file-input">
+          )}
+          {covers.length < 3 && (
+            <Dropzone accept="image/*" multiple onFiles={onCover} testid="cover-dropzone" inputTestid="cover-file-input">
               <UploadCloud className="h-7 w-7 text-zinc-400 mx-auto mb-2" />
               <p className="text-sm text-zinc-600 font-medium">Перетащите фото сюда или нажмите</p>
-              <p className="text-xs text-zinc-400 mt-1">одно изображение</p>
+              <p className="text-xs text-zinc-400 mt-1">до 3 изображений ({covers.length}/3)</p>
             </Dropzone>
           )}
         </section>
