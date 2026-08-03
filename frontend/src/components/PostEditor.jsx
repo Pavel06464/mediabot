@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, Image as ImageIcon, Film, Star, Trash2, Save, UploadCloud, Send, AlertTriangle } from "lucide-react";
+import { ArrowLeft, Image as ImageIcon, Film, Star, Trash2, Save, UploadCloud, Send, AlertTriangle, GripVertical } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -82,7 +82,7 @@ export default function PostEditor() {
   };
 
   useEffect(() => {
-    api.get("/hashtags/popular?limit=5").then(({ data }) => setPopularTags((data.tags || []).map((t) => t.tag))).catch(() => {});
+    api.get("/hashtags/popular?limit=10").then(({ data }) => setPopularTags((data.tags || []).map((t) => t.tag))).catch(() => {});
     api.get("/channels").then(({ data }) => {
       const list = data.channels || [];
       setChannels(list);
@@ -142,6 +142,40 @@ export default function PostEditor() {
     const setter = kind === "video" ? setVideos : setPhotos;
     setter((prev) => prev.filter((x) => x.id !== id));
   };
+
+  // ── Drag-and-drop переупорядочивание медиа ──
+  const dragItem = useRef(null); // {list, index}
+  const [dragOver, setDragOver] = useState(null); // {list, index}
+  const SETTERS = { covers: setCovers, photos: setPhotos, videos: setVideos };
+  const onDragStart = (list, index) => { dragItem.current = { list, index }; };
+  const onDragEnter = (list, index) => {
+    if (dragItem.current && dragItem.current.list === list) setDragOver({ list, index });
+  };
+  const onDragEnd = () => { dragItem.current = null; setDragOver(null); };
+  const onDrop = (list, to) => {
+    const from = dragItem.current;
+    dragItem.current = null;
+    setDragOver(null);
+    if (!from || from.list !== list || from.index === to) return;
+    SETTERS[list]((prev) => {
+      const arr = [...prev];
+      const [moved] = arr.splice(from.index, 1);
+      arr.splice(to, 0, moved);
+      return arr;
+    });
+  };
+  const dropProps = (list, index) => ({
+    onDragEnter: () => onDragEnter(list, index),
+    onDragOver: (e) => e.preventDefault(),
+    onDrop: () => onDrop(list, index),
+  });
+  const handleProps = (list, index) => ({
+    draggable: true,
+    onDragStart: () => onDragStart(list, index),
+    onDragEnd: onDragEnd,
+  });
+  const dragCls = (list, index) =>
+    dragOver?.list === list && dragOver?.index === index ? " ring-2 ring-[#0055FF] ring-offset-1" : "";
 
   const create = () => {
     if (!title.trim()) return toast.error("Укажите заголовок");
@@ -214,9 +248,12 @@ export default function PostEditor() {
           {covers.length > 0 && (
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3" data-testid="covers-list">
               {covers.map((c, i) => (
-                <div key={c.id} className="relative bg-white border border-zinc-200 p-2" data-testid={`cover-item-${i}`}>
-                  <img src={c.localUrl} alt="cover" className="h-40 w-full object-contain bg-zinc-50" />
+                <div key={c.id} {...dropProps("covers", i)} className={`relative bg-white border border-zinc-200 p-2${dragCls("covers", i)}`} data-testid={`cover-item-${i}`}>
+                  <img src={c.localUrl} alt="cover" className="h-40 w-full object-contain bg-zinc-50 pointer-events-none" />
                   <span className="absolute top-3 left-3 bg-[#0055FF] text-white text-[11px] font-bold px-1.5 py-0.5">{i + 1}</span>
+                  <span {...handleProps("covers", i)} className="absolute bottom-3 left-3 bg-white/90 border border-zinc-200 p-1 text-zinc-500 hover:text-[#0055FF] cursor-move" title="Перетащите для изменения порядка" data-testid={`cover-drag-${i}`}>
+                    <GripVertical className="h-4 w-4" />
+                  </span>
                   <button onClick={() => removeCover(c.id)} className="absolute top-3 right-3 bg-white border border-zinc-200 p-1.5 text-zinc-500 hover:text-[#FF3333]" data-testid={`cover-remove-${i}`}>
                     <Trash2 className="h-4 w-4" />
                   </button>
@@ -289,9 +326,12 @@ export default function PostEditor() {
             {photos.length > 0 && <span className="text-sm text-zinc-400">— {photos.length}</span>}
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-3">
-            {photos.map((p) => (
-              <div key={p.id} className="relative bg-white border border-zinc-200 p-1.5" data-testid={`photo-item-${p.id}`}>
-                <img src={p.localUrl} alt="" className="h-28 w-full object-cover bg-zinc-50" />
+            {photos.map((p, i) => (
+              <div key={p.id} {...dropProps("photos", i)} className={`relative bg-white border border-zinc-200 p-1.5${dragCls("photos", i)}`} data-testid={`photo-item-${p.id}`}>
+                <img src={p.localUrl} alt="" className="h-28 w-full object-cover bg-zinc-50 pointer-events-none" />
+                <span {...handleProps("photos", i)} className="absolute bottom-11 left-2 bg-white/90 border border-zinc-200 p-1 text-zinc-500 hover:text-[#0055FF] cursor-move" title="Перетащите для изменения порядка" data-testid={`photo-drag-${i}`}>
+                  <GripVertical className="h-3.5 w-3.5" />
+                </span>
                 <button onClick={() => removeItem("photo", p.id)} className="absolute top-2 right-2 bg-white border border-zinc-200 p-1 text-zinc-500 hover:text-[#FF3333]">
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
@@ -313,9 +353,12 @@ export default function PostEditor() {
             {videos.length > 0 && <span className="text-sm text-zinc-400">— {videos.length}</span>}
           </div>
           <div className="space-y-3 mb-3">
-            {videos.map((v) => (
-              <div key={v.id} className="relative bg-white border border-zinc-200 p-2" data-testid={`video-item-${v.id}`}>
+            {videos.map((v, i) => (
+              <div key={v.id} {...dropProps("videos", i)} className={`relative bg-white border border-zinc-200 p-2${dragCls("videos", i)}`} data-testid={`video-item-${v.id}`}>
                 <video src={v.localUrl} controls className="max-h-56 w-full bg-black" />
+                <span {...handleProps("videos", i)} className="absolute top-3 left-3 bg-white/90 border border-zinc-200 p-1 text-zinc-500 hover:text-[#0055FF] cursor-move" title="Перетащите для изменения порядка" data-testid={`video-drag-${i}`}>
+                  <GripVertical className="h-4 w-4" />
+                </span>
                 <button onClick={() => removeItem("video", v.id)} className="absolute top-3 right-3 bg-white border border-zinc-200 p-1.5 text-zinc-500 hover:text-[#FF3333]">
                   <Trash2 className="h-4 w-4" />
                 </button>
