@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { toast } from "sonner";
-import { CalendarClock, Trash2, ArrowUp, ArrowDown, Image as ImageIcon, Film, Plus, Send, Radio } from "lucide-react";
+import { CalendarClock, Trash2, ArrowUp, ArrowDown, Image as ImageIcon, Film, Plus, Send, Radio, GripVertical } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -140,14 +140,34 @@ export default function SchedulerSettings({ open, onOpenChange, onChange }) {
     if (j < 0 || j >= queue.length) return;
     const next = [...queue];
     [next[idx], next[j]] = [next[j], next[idx]];
+    persistOrder(next);
+  };
+
+  // Drag-and-drop переупорядочивание очереди
+  const dragIdx = useRef(null);
+  const [dragOverIdx, setDragOverIdx] = useState(null);
+  const persistOrder = async (next) => {
     setQueue(next);
     try { await api.put(`/channels/${sel.id}/queue`, { order: next.map((x) => x.id) }); onChange?.(); }
     catch { toast.error("Не удалось изменить порядок"); loadQueue(sel.id); }
   };
+  const onQDragStart = (idx) => { dragIdx.current = idx; };
+  const onQDragEnter = (idx) => { if (dragIdx.current !== null) setDragOverIdx(idx); };
+  const onQDragEnd = () => { dragIdx.current = null; setDragOverIdx(null); };
+  const onQDrop = (idx) => {
+    const from = dragIdx.current;
+    dragIdx.current = null;
+    setDragOverIdx(null);
+    if (from === null || from === idx) return;
+    const next = [...queue];
+    const [moved] = next.splice(from, 1);
+    next.splice(idx, 0, moved);
+    persistOrder(next);
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="rounded-none sm:max-w-3xl max-h-[90vh] overflow-y-auto" data-testid="scheduler-dialog">
+      <DialogContent className="rounded-none sm:max-w-4xl max-h-[92vh] overflow-y-auto" data-testid="scheduler-dialog">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <CalendarClock className="h-5 w-5 text-[#0055FF]" /> Каналы и планировщик
@@ -255,7 +275,7 @@ export default function SchedulerSettings({ open, onOpenChange, onChange }) {
 
                 <div>
                   <div className="label-caps text-zinc-500 mb-2 flex items-center justify-between gap-2 flex-wrap">
-                    <span>Очередь ({queue.length})</span>
+                    <span>Очередь ({queue.length}) <span className="normal-case font-normal text-zinc-400">— перетаскивайте за <GripVertical className="h-3 w-3 inline" /> для изменения порядка</span></span>
                     {sel.enabled && queue.length > 0 && (
                       <span className="text-[#0055FF] normal-case font-semibold" data-testid="queue-end-time-header">
                         последний пост: {fmtUTC(queueEndIso(sel, queue.length))}
@@ -263,27 +283,44 @@ export default function SchedulerSettings({ open, onOpenChange, onChange }) {
                     )}
                   </div>
                   {queue.length === 0 ? (
-                    <div className="text-sm text-zinc-400 border border-dashed border-zinc-200 p-4 text-center" data-testid="queue-empty">Очередь пуста</div>
+                    <div className="text-sm text-zinc-400 border border-dashed border-zinc-200 p-8 text-center" data-testid="queue-empty">Очередь пуста</div>
                   ) : (
-                    <div className="space-y-2 max-h-56 overflow-y-auto" data-testid="queue-list">
+                    <div className="space-y-2 max-h-[480px] overflow-y-auto pr-1" data-testid="queue-list">
                       {queue.map((p, idx) => (
-                        <div key={p.id} className="flex items-center gap-3 border border-zinc-200 p-2" data-testid={`queue-item-${p.id}`}>
-                          <span className="text-xs font-bold text-zinc-400 w-5 text-center">{idx + 1}</span>
-                          {p.cover_url ? <img src={p.cover_url} alt="" className="h-9 w-9 object-cover border border-zinc-200" /> : <div className="h-9 w-9 bg-zinc-900 flex items-center justify-center"><Film className="h-4 w-4 text-white" /></div>}
+                        <div
+                          key={p.id}
+                          onDragEnter={() => onQDragEnter(idx)}
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={() => onQDrop(idx)}
+                          className={`flex items-center gap-3 border bg-white p-3 transition-colors duration-150 ${dragOverIdx === idx ? "border-[#0055FF] ring-2 ring-[#0055FF] ring-offset-1" : "border-zinc-200"}`}
+                          data-testid={`queue-item-${p.id}`}
+                        >
+                          <span
+                            draggable
+                            onDragStart={() => onQDragStart(idx)}
+                            onDragEnd={onQDragEnd}
+                            className="cursor-move text-zinc-400 hover:text-[#0055FF] shrink-0"
+                            title="Перетащите для изменения порядка"
+                            data-testid={`queue-drag-${p.id}`}
+                          >
+                            <GripVertical className="h-5 w-5" />
+                          </span>
+                          <span className="text-sm font-bold text-zinc-400 w-6 text-center shrink-0">{idx + 1}</span>
+                          {p.cover_url ? <img src={p.cover_url} alt="" className="h-14 w-14 object-cover border border-zinc-200 shrink-0" /> : <div className="h-14 w-14 bg-zinc-900 flex items-center justify-center shrink-0"><Film className="h-5 w-5 text-white" /></div>}
                           <div className="flex-1 min-w-0">
                             <div className="text-sm font-semibold truncate">{p.title?.trim() ? p.title : "(без названия)"}</div>
-                            <div className="text-xs text-zinc-400 flex items-center gap-2">
+                            <div className="text-xs text-zinc-400 flex items-center gap-3 mt-0.5">
                               <span className="flex items-center gap-0.5"><ImageIcon className="h-3 w-3" />{p.photo_count ?? 0}</span>
                               <span className="flex items-center gap-0.5"><Film className="h-3 w-3" />{p.video_count ?? 0}</span>
-                              {sel.enabled && sel.next_run_at && (
-                                <span className="flex items-center gap-0.5 text-[#0055FF]" data-testid={`queue-eta-${p.id}`}>
-                                  <CalendarClock className="h-3 w-3" />
-                                  {fmtUTC(new Date(new Date(sel.next_run_at).getTime() + idx * (sel.interval_minutes || 0) * 60000).toISOString())}
-                                </span>
-                              )}
                             </div>
+                            {sel.enabled && sel.next_run_at && (
+                              <div className="text-xs text-[#0055FF] font-semibold flex items-center gap-1 mt-1" data-testid={`queue-eta-${p.id}`}>
+                                <CalendarClock className="h-3.5 w-3.5" />
+                                {fmtUTC(new Date(new Date(sel.next_run_at).getTime() + idx * (sel.interval_minutes || 0) * 60000).toISOString())}
+                              </div>
+                            )}
                           </div>
-                          <div className="flex items-center gap-0.5">
+                          <div className="flex items-center gap-0.5 shrink-0">
                             <button onClick={() => move(idx, -1)} disabled={idx === 0} className="p-1 text-zinc-400 hover:text-[#0055FF] disabled:opacity-30" data-testid={`queue-up-${p.id}`}><ArrowUp className="h-4 w-4" /></button>
                             <button onClick={() => move(idx, 1)} disabled={idx === queue.length - 1} className="p-1 text-zinc-400 hover:text-[#0055FF] disabled:opacity-30" data-testid={`queue-down-${p.id}`}><ArrowDown className="h-4 w-4" /></button>
                             <button onClick={() => removeFromQueue(p.id)} className="p-1 text-zinc-400 hover:text-[#FF3333]" data-testid={`queue-remove-${p.id}`}><Trash2 className="h-4 w-4" /></button>

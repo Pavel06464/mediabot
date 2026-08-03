@@ -61,6 +61,8 @@
 
 - 2026-06 (fork): Дата/время окончания очереди при включённой авто-публикации. В SchedulerSettings (модалка «Каналы и план») per-channel: helper `queueEndIso(sel,count)` = next_run_at + (N−1)×interval_minutes (когда уйдёт последний пост). Показывается в 3 местах: в блоке авто-публикации «Очередь закончится: <UTC>» (data-testid=queue-end-time), в заголовке очереди «последний пост: <UTC>» (queue-end-time-header) и у КАЖДОГО поста очереди — расчётное время публикации next_run+idx×interval (queue-eta-<id>). Только когда enabled и очередь непуста; всё по UTC, считается на фронте из уже отдаваемых полей (next_run_at, interval_minutes, queue). Проверено: API отдаёт enabled/next_run_at/interval_minutes/queue; расчёт 3 поста @60мин от 12:00 → 12:00/13:00/14:00.
 
+- 2026-06 (fork): Очередь в SchedulerSettings — DnD + крупнее + ETA по постам. Каждый пост очереди перетаскивается за grip-ручку (draggable span, data-testid=queue-drag-<id>), строка — drop-цель с подсветкой (dragOverIdx), порядок сохраняется через `persistOrder`→`PUT /channels/{id}/queue`; стрелки ↑↓ (move) переведены на persistOrder. Модалка расширена sm:max-w-4xl, список очереди max-h-[480px], строки p-3 с превью h-14. Расчётное время публикации каждого поста next_run+idx×interval (queue-eta-<id>) вынесено на отдельную строку; в заголовке «последний пост: …». Только фронт, эндпоинт очереди прежний (проверен ранее). Компиляция чистая.
+
 ## Deployment status (user VPS 94.183.178.153)
 - Phase 1 (файлы до 20 МБ, GridFS) развёрнут и работал. 
 - Требуется: новый токен BotFather (старый отозван), R2 Secret Access Key, обновление .env + update.sh для новой dashboard-only версии.
