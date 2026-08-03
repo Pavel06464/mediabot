@@ -173,6 +173,27 @@ async def delete_message(chat_id, message_id):
         return True
 
 
+async def edit_message_caption(chat_id, message_id, caption: str):
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(f"{_api()}/editMessageCaption",
+                         json={"chat_id": chat_id, "message_id": message_id, "caption": caption, "parse_mode": "HTML"})
+        data = r.json()
+        if not data.get("ok"):
+            raise ValueError(data.get("description", "Ошибка Telegram"))
+        return True
+
+
+async def edit_message_text(chat_id, message_id, text: str):
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(f"{_api()}/editMessageText",
+                         json={"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML",
+                               "disable_web_page_preview": False})
+        data = r.json()
+        if not data.get("ok"):
+            raise ValueError(data.get("description", "Ошибка Telegram"))
+        return True
+
+
 async def send_media_group(chat_id, media: list):
     """Отправляет альбом (2-10 медиа) по URL. media: [{type, media, caption?, parse_mode?}]."""
     async with httpx.AsyncClient(timeout=300) as c:

@@ -27,8 +27,10 @@ import {
   Clock,
   ListPlus,
   ArrowUpDown,
+  Replace,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -151,6 +153,36 @@ export default function Dashboard() {
   const [delChannel, setDelChannel] = useState(false);
   const [delMedia, setDelMedia] = useState(true);
   const [deleting, setDeleting] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkFind, setBulkFind] = useState("");
+  const [bulkReplace, setBulkReplace] = useState("");
+  const [bulkOnlyChannel, setBulkOnlyChannel] = useState(true);
+  const [bulkRunning, setBulkRunning] = useState(false);
+
+  const runBulkReplace = async () => {
+    if (!bulkFind.trim()) return toast.error("Укажите текст, который нужно заменить");
+    setBulkRunning(true);
+    try {
+      const { data } = await api.post("/posts/bulk-replace-description", {
+        find: bulkFind,
+        replace: bulkReplace,
+        channel_ref: bulkOnlyChannel ? selectedChannel : null,
+        update_live: true,
+      });
+      if (data.matched === 0) {
+        toast.info("Постов с таким текстом не найдено");
+      } else {
+        toast.success(`Замена запущена в ${data.matched} постах — идёт в фоне, обновите через минуту`);
+        setBulkOpen(false);
+        setBulkFind(""); setBulkReplace("");
+        setTimeout(load, 3000);
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Ошибка массовой замены");
+    } finally {
+      setBulkRunning(false);
+    }
+  };
 
   const load = useCallback(async () => {
     if (!selectedChannel) { setLoading(false); return; }
@@ -296,6 +328,42 @@ export default function Dashboard() {
       <ChannelSettings open={channelOpen} onOpenChange={setChannelOpen} onChange={load} />
       <WatermarkSettings open={watermarkOpen} onOpenChange={setWatermarkOpen} />
       <SchedulerSettings open={schedulerOpen} onOpenChange={setSchedulerOpen} onChange={load} />
+
+      <Dialog open={bulkOpen} onOpenChange={(o) => !o && setBulkOpen(false)}>
+        <DialogContent className="rounded-none sm:max-w-md" data-testid="bulk-replace-dialog">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Replace className="h-5 w-5 text-[#0055FF]" /> Заменить текст в описаниях
+            </DialogTitle>
+            <DialogDescription>
+              Найдёт текст во всех описаниях и заменит его. Например, старую ссылку на новую. Опубликованные посты тоже обновятся в канале.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div>
+              <label className="label-caps text-zinc-500 block mb-1">Что заменить</label>
+              <Input value={bulkFind} onChange={(e) => setBulkFind(e.target.value)} placeholder="https://old-link.com/…" className="rounded-none" data-testid="bulk-find-input" />
+            </div>
+            <div>
+              <label className="label-caps text-zinc-500 block mb-1">На что</label>
+              <Input value={bulkReplace} onChange={(e) => setBulkReplace(e.target.value)} placeholder="https://new-link.com/… (пусто = удалить)" className="rounded-none" data-testid="bulk-replace-input" />
+            </div>
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox checked={bulkOnlyChannel} onCheckedChange={(v) => setBulkOnlyChannel(!!v)} data-testid="bulk-only-channel" />
+              <span className="text-sm">
+                Только текущий канал {currentChannel?.channel_title ? `(${currentChannel.channel_title})` : ""}
+                <span className="block text-xs text-zinc-400">Снимите галочку, чтобы заменить во всех каналах</span>
+              </span>
+            </label>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkOpen(false)} className="rounded-none border-zinc-200" data-testid="bulk-cancel">Отмена</Button>
+            <Button onClick={runBulkReplace} disabled={bulkRunning} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="bulk-run">
+              {bulkRunning ? "Запускаю…" : "Заменить"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!scheduleTarget} onOpenChange={(o) => !o && setScheduleTarget(null)}>
         <DialogContent className="rounded-none sm:max-w-md" data-testid="schedule-dialog">
@@ -499,6 +567,9 @@ export default function Dashboard() {
             <p className="text-zinc-500 mt-2 max-w-2xl">Статистика и посты показаны только для выбранного канала. Сменить канал можно в шапке.</p>
           </div>
           <div className="flex items-center gap-2">
+            <Button onClick={() => setBulkOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="bulk-replace-btn">
+              <Replace className="h-4 w-4 mr-2" /> Заменить в описаниях
+            </Button>
             <Button onClick={() => navigate("/new")} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="new-post-btn">
               <Plus className="h-4 w-4 mr-2" /> Новый пост
             </Button>
