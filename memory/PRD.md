@@ -59,6 +59,8 @@
 
 - 2026-06 (fork): Заголовок необязателен для обычного (нативного) поста. Бэкенд: create_draft требует title только для post_type=telegraph; edit_post — только для не-native; `_native_caption` переписан — если title пустой, строка `<b>title</b>` пропускается (правильно склеивает описание/хештеги). Telegraph по-прежнему требует заголовок (title страницы). Фронт PostEditor: валидация create() требует title только для telegraph, placeholder «Заголовок (необязательно)» + подсказка для native. EditPost: пустой title разрешён для native (postType из /edit). Dashboard: посты без заголовка показываются как «(без названия)». Тесты: юнит _native_caption (пустой/с заголовком/только хештеги), e2e API (native без title → 200, telegraph без title → 400).
 
+- 2026-06 (fork): Дата/время окончания очереди при включённой авто-публикации. В SchedulerSettings (модалка «Каналы и план») per-channel: helper `queueEndIso(sel,count)` = next_run_at + (N−1)×interval_minutes (когда уйдёт последний пост). Показывается в 3 местах: в блоке авто-публикации «Очередь закончится: <UTC>» (data-testid=queue-end-time), в заголовке очереди «последний пост: <UTC>» (queue-end-time-header) и у КАЖДОГО поста очереди — расчётное время публикации next_run+idx×interval (queue-eta-<id>). Только когда enabled и очередь непуста; всё по UTC, считается на фронте из уже отдаваемых полей (next_run_at, interval_minutes, queue). Проверено: API отдаёт enabled/next_run_at/interval_minutes/queue; расчёт 3 поста @60мин от 12:00 → 12:00/13:00/14:00.
+
 ## Deployment status (user VPS 94.183.178.153)
 - Phase 1 (файлы до 20 МБ, GridFS) развёрнут и работал. 
 - Требуется: новый токен BotFather (старый отозван), R2 Secret Access Key, обновление .env + update.sh для новой dashboard-only версии.

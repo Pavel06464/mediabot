@@ -29,6 +29,14 @@ const fmtUTC = (iso) => {
 
 const fromMinutes = (m) => ({ d: Math.floor(m / 1440), h: Math.floor((m % 1440) / 60), m: m % 60 });
 
+// Когда уйдёт ПОСЛЕДНИЙ пост очереди: next_run + (N-1)*interval
+const queueEndIso = (sel, count) => {
+  if (!sel?.enabled || !sel?.next_run_at || !count) return null;
+  const base = new Date(sel.next_run_at).getTime();
+  if (Number.isNaN(base)) return null;
+  return new Date(base + (count - 1) * (sel.interval_minutes || 0) * 60000).toISOString();
+};
+
 export default function SchedulerSettings({ open, onOpenChange, onChange }) {
   const [channels, setChannels] = useState([]);
   const [selId, setSelId] = useState(null);
@@ -200,6 +208,11 @@ export default function SchedulerSettings({ open, onOpenChange, onChange }) {
                   <div>
                     <div className="font-semibold text-sm">Авто-публикация из очереди</div>
                     <div className="text-xs text-zinc-400 mt-0.5">{sel.enabled ? `Следующая: ${fmtUTC(sel.next_run_at)}` : "Выключена"}</div>
+                    {sel.enabled && queue.length > 0 && (
+                      <div className="text-xs text-[#0055FF] font-semibold mt-1 flex items-center gap-1" data-testid="queue-end-time">
+                        <CalendarClock className="h-3 w-3" /> Очередь закончится: {fmtUTC(queueEndIso(sel, queue.length))}
+                      </div>
+                    )}
                   </div>
                   <Switch checked={sel.enabled} onCheckedChange={(v) => saveChannel({ enabled: v })} data-testid="channel-enabled-toggle" />
                 </div>
@@ -241,7 +254,14 @@ export default function SchedulerSettings({ open, onOpenChange, onChange }) {
                 </Button>
 
                 <div>
-                  <div className="label-caps text-zinc-500 mb-2">Очередь ({queue.length})</div>
+                  <div className="label-caps text-zinc-500 mb-2 flex items-center justify-between gap-2 flex-wrap">
+                    <span>Очередь ({queue.length})</span>
+                    {sel.enabled && queue.length > 0 && (
+                      <span className="text-[#0055FF] normal-case font-semibold" data-testid="queue-end-time-header">
+                        последний пост: {fmtUTC(queueEndIso(sel, queue.length))}
+                      </span>
+                    )}
+                  </div>
                   {queue.length === 0 ? (
                     <div className="text-sm text-zinc-400 border border-dashed border-zinc-200 p-4 text-center" data-testid="queue-empty">Очередь пуста</div>
                   ) : (
@@ -251,10 +271,16 @@ export default function SchedulerSettings({ open, onOpenChange, onChange }) {
                           <span className="text-xs font-bold text-zinc-400 w-5 text-center">{idx + 1}</span>
                           {p.cover_url ? <img src={p.cover_url} alt="" className="h-9 w-9 object-cover border border-zinc-200" /> : <div className="h-9 w-9 bg-zinc-900 flex items-center justify-center"><Film className="h-4 w-4 text-white" /></div>}
                           <div className="flex-1 min-w-0">
-                            <div className="text-sm font-semibold truncate">{p.title}</div>
+                            <div className="text-sm font-semibold truncate">{p.title?.trim() ? p.title : "(без названия)"}</div>
                             <div className="text-xs text-zinc-400 flex items-center gap-2">
                               <span className="flex items-center gap-0.5"><ImageIcon className="h-3 w-3" />{p.photo_count ?? 0}</span>
                               <span className="flex items-center gap-0.5"><Film className="h-3 w-3" />{p.video_count ?? 0}</span>
+                              {sel.enabled && sel.next_run_at && (
+                                <span className="flex items-center gap-0.5 text-[#0055FF]" data-testid={`queue-eta-${p.id}`}>
+                                  <CalendarClock className="h-3 w-3" />
+                                  {fmtUTC(new Date(new Date(sel.next_run_at).getTime() + idx * (sel.interval_minutes || 0) * 60000).toISOString())}
+                                </span>
+                              )}
                             </div>
                           </div>
                           <div className="flex items-center gap-0.5">
