@@ -609,6 +609,7 @@ export default function Dashboard() {
                 <TableRow className="hover:bg-transparent border-zinc-200">
                   <TableHead className="w-[60px]"></TableHead>
                   <TableHead className="label-caps text-zinc-500">Заголовок</TableHead>
+                  <TableHead className="label-caps text-zinc-500">Описание</TableHead>
                   <TableHead className="label-caps text-zinc-500">Дата</TableHead>
                   <TableHead className="label-caps text-zinc-500 text-center">Медиа</TableHead>
                   <TableHead className="label-caps text-zinc-500">Ссылка</TableHead>
@@ -629,6 +630,13 @@ export default function Dashboard() {
                       )}
                     </TableCell>
                     <TableCell className="font-semibold max-w-[240px] truncate">{p.title?.trim() ? p.title : <span className="text-zinc-400 italic font-normal">(без названия)</span>}</TableCell>
+                    <TableCell className="text-sm text-zinc-500 max-w-[260px]" data-testid={`desc-${p.id}`}>
+                      {p.preview?.trim() ? (
+                        <span className="line-clamp-2" title={p.preview}>{p.preview}</span>
+                      ) : (
+                        <span className="text-zinc-300">—</span>
+                      )}
+                    </TableCell>
                     <TableCell className="text-sm text-zinc-500 whitespace-nowrap">{fmtDate(p.created_at)}</TableCell>
                     <TableCell className="text-center">
                       <div className="flex justify-center items-center gap-3 text-zinc-600">
