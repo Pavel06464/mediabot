@@ -52,6 +52,7 @@ export default function EditPost() {
   const [link, setLink] = useState(null);
   const [channels, setChannels] = useState([]);
   const [channelRef, setChannelRef] = useState("");
+  const [postType, setPostType] = useState("telegraph");
 
   useEffect(() => {
     (async () => {
@@ -65,6 +66,7 @@ export default function EditPost() {
         setHashtags(data.hashtags || []);
         setMedia(data.media || []);
         setLink(data.telegraph_url);
+        setPostType(data.post_type || "telegraph");
         setChannels(chRes.data.channels || []);
         setChannelRef(data.channel_ref || chRes.data.channels?.[0]?.id || "");
       } catch (e) {
@@ -115,7 +117,7 @@ export default function EditPost() {
     setNewMedia((prev) => prev.filter((m) => m.tempId !== tempId));
 
   const save = async () => {
-    if (!title.trim()) return toast.error("Укажите заголовок");
+    if (postType !== "native" && !title.trim()) return toast.error("Укажите заголовок");
     if (newMedia.some((m) => m.uploading)) return toast.error("Дождитесь загрузки новых файлов");
     setSaving(true);
     try {

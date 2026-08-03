@@ -178,7 +178,7 @@ export default function PostEditor() {
     dragOver?.list === list && dragOver?.index === index ? " ring-2 ring-[#0055FF] ring-offset-1" : "";
 
   const create = () => {
-    if (!title.trim()) return toast.error("Укажите заголовок");
+    if (postType === "telegraph" && !title.trim()) return toast.error("Укажите заголовок для Telegraph-статьи");
     if (!covers.length && !photos.length && !videos.length && !description.trim())
       return toast.error("Добавьте обложку, медиа или описание");
     if (publishAfter && postType === "telegraph" && !covers.length && !photos.length)
@@ -212,9 +212,11 @@ export default function PostEditor() {
       <main className="max-w-3xl mx-auto px-6 py-8 space-y-8">
         <div>
           <span className="label-caps text-zinc-400">Новый пост</span>
-          <Input data-testid="editor-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Заголовок"
+          <Input data-testid="editor-title" value={title} onChange={(e) => setTitle(e.target.value)} placeholder={postType === "native" ? "Заголовок (необязательно)" : "Заголовок"}
             className="rounded-none border-0 border-b-2 border-zinc-200 px-0 text-3xl font-black tracking-tight h-auto py-3 mt-2 focus-visible:ring-0 focus-visible:border-[#0055FF]" />
-          {titleWarn && (
+          {postType === "native" && (
+            <p className="text-xs text-zinc-400 mt-2" data-testid="title-optional-hint">Для обычного поста заголовок можно не указывать.</p>
+          )}          {titleWarn && (
             <p className="text-xs text-amber-600 mt-2 flex items-center gap-1.5" data-testid="title-dup-warning">
               <AlertTriangle className="h-3.5 w-3.5" /> Пост с таким названием уже существует
             </p>

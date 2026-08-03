@@ -628,7 +628,7 @@ export default function Dashboard() {
                         </div>
                       )}
                     </TableCell>
-                    <TableCell className="font-semibold max-w-[240px] truncate">{p.title}</TableCell>
+                    <TableCell className="font-semibold max-w-[240px] truncate">{p.title?.trim() ? p.title : <span className="text-zinc-400 italic font-normal">(без названия)</span>}</TableCell>
                     <TableCell className="text-sm text-zinc-500 whitespace-nowrap">{fmtDate(p.created_at)}</TableCell>
                     <TableCell className="text-center">
                       <div className="flex justify-center items-center gap-3 text-zinc-600">

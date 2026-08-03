@@ -532,24 +532,25 @@ def _native_caption(post: dict) -> str:
     blocks = post.get("blocks", [])
     desc = next((b.get("value", "") for b in blocks if b.get("type") == "text"), "")
     hashtags = post.get("hashtags") or []
+    title = (post.get("title") or "").strip()
 
     def plain(d):
-        parts = [post["title"]]
+        parts = [title] if title else []
         if d:
-            parts += ["", d]
+            parts += (["", d] if parts else [d])
         if hashtags:
-            parts += ["", " ".join(hashtags)]
+            parts += ["", " ".join(hashtags)] if parts else [" ".join(hashtags)]
         return "\n".join(parts)
 
     if len(plain(desc)) > 1024 and desc:
         overflow = len(plain(desc)) - 1024 + 1
         desc = desc[:max(0, len(desc) - overflow)].rstrip() + "…"
 
-    parts = [f"<b>{_html.escape(post['title'], quote=False)}</b>"]
+    parts = [f"<b>{_html.escape(title, quote=False)}</b>"] if title else []
     if desc:
-        parts += ["", _caption_html(desc)]
+        parts += (["", _caption_html(desc)] if parts else [_caption_html(desc)])
     if hashtags:
-        parts += ["", " ".join(hashtags)]
+        parts += (["", " ".join(hashtags)] if parts else [" ".join(hashtags)])
     return "\n".join(parts)
 
 
@@ -798,8 +799,9 @@ async def _finalize_post(post_id: str):
 
 @api_router.post("/posts/draft")
 async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
-    if not payload.title.strip():
-        raise HTTPException(status_code=400, detail="Укажите заголовок")
+    post_type = payload.post_type if payload.post_type in ("telegraph", "native") else "telegraph"
+    if post_type == "telegraph" and not payload.title.strip():
+        raise HTTPException(status_code=400, detail="Укажите заголовок для Telegraph-статьи")
     tags = _normalize_tags(payload.hashtags)
     desc_text = (payload.description or "").strip()
     blocks = []
@@ -841,7 +843,7 @@ async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
         "published": False,
         "channel_title": None,
         "channel_message_id": None,
-        "post_type": payload.post_type if payload.post_type in ("telegraph", "native") else "telegraph",
+        "post_type": post_type,
         "status": "uploading" if slots else "processing",
         "scheduled_at": None,
         "in_queue": False,
@@ -1244,11 +1246,11 @@ async def get_post_for_edit(post_id: str, user=Depends(auth.get_current_user)):
 
 @api_router.put("/posts/{post_id}")
 async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_current_user)):
-    if not payload.title.strip():
-        raise HTTPException(status_code=400, detail="Укажите заголовок")
     post = await db.posts.find_one({"id": post_id})
     if not post:
         raise HTTPException(status_code=404, detail="Пост не найден")
+    if post.get("post_type") != "native" and not payload.title.strip():
+        raise HTTPException(status_code=400, detail="Укажите заголовок")
     if post.get("post_type") != "native" and not post.get("telegraph_path"):
         raise HTTPException(status_code=400, detail="Статья ещё создаётся, редактирование недоступно")
     blocks = post.get("blocks", [])
