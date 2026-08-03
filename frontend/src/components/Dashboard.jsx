@@ -93,7 +93,7 @@ const jobLabel = (j) =>
     : j.attempt > 1 ? `Загрузка… (попытка ${j.attempt})`
     : "Загрузка…";
 
-function StatCard({ label, value, icon: Icon, accent, testid }) {
+function StatCard({ label, value, icon: Icon, accent, testid, sub }) {
   return (
     <div data-testid={testid} className="bg-white border border-zinc-200 p-6 flex flex-col justify-between hover:border-zinc-400 transition-colors duration-150">
       <div className="flex items-center justify-between">
@@ -101,6 +101,7 @@ function StatCard({ label, value, icon: Icon, accent, testid }) {
         <Icon className="h-4 w-4 text-zinc-400" strokeWidth={2} />
       </div>
       <div className="mt-6 text-5xl font-black tracking-tighter" style={{ color: accent || "#09090B" }}>{value}</div>
+      {sub && <div className="mt-2 text-xs font-semibold text-[#0055FF] flex items-center gap-1" data-testid={`${testid}-sub`}>{sub}</div>}
     </div>
   );
 }
@@ -141,6 +142,12 @@ export default function Dashboard() {
 
   const chanName = (ref) => channels.find((c) => c.id === ref)?.channel_title;
   const currentChannel = channels.find((c) => c.id === selectedChannel);
+  const queueEndsAt = (() => {
+    if (!currentChannel?.enabled || !currentChannel?.next_run_at || !stats?.in_queue) return null;
+    const base = new Date(currentChannel.next_run_at).getTime();
+    if (Number.isNaN(base)) return null;
+    return new Date(base + (stats.in_queue - 1) * (currentChannel.interval_minutes || 0) * 60000).toISOString();
+  })();
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [qInput, setQInput] = useState("");
@@ -581,7 +588,8 @@ export default function Dashboard() {
           <StatCard label="Опубликовано" value={stats?.total_published ?? "—"} icon={Radio} accent="#00CC66" testid="stat-published" />
           <StatCard label="Черновики" value={stats?.total_drafts ?? "—"} icon={FileText} accent="#FF3333" testid="stat-drafts" />
           <StatCard label="Медиа-файлов" value={stats?.total_media ?? "—"} icon={ImageIcon} accent="#0055FF" testid="stat-media" />
-          <StatCard label="В очереди" value={stats?.in_queue ?? "—"} icon={ListPlus} accent="#D97706" testid="stat-queue" />
+          <StatCard label="В очереди" value={stats?.in_queue ?? "—"} icon={ListPlus} accent="#D97706" testid="stat-queue"
+            sub={queueEndsAt ? <><CalendarClock className="h-3 w-3" /> закончится {fmtUTC(queueEndsAt)}</> : null} />
         </div>
 
         {jobs.length > 0 && (
