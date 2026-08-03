@@ -8,6 +8,7 @@ import { Textarea } from "@/components/ui/textarea";
 import api from "@/lib/api";
 import { MarkdownToolbar } from "@/components/MarkdownToolbar";
 import { HashtagsInput } from "@/components/HashtagsInput";
+import SignaturesManager from "@/components/SignaturesManager";
 
 let nc = 0;
 const nid = () => `n${++nc}`;
@@ -53,6 +54,20 @@ export default function EditPost() {
   const [channels, setChannels] = useState([]);
   const [channelRef, setChannelRef] = useState("");
   const [postType, setPostType] = useState("telegraph");
+  const [signatures, setSignatures] = useState([]);
+  const [sigOpen, setSigOpen] = useState(false);
+
+  const loadSignatures = useCallback(() => {
+    api.get("/signatures").then(({ data }) => setSignatures(data.signatures || [])).catch(() => {});
+  }, []);
+  useEffect(() => { loadSignatures(); }, [loadSignatures]);
+
+  const insertSignature = (sigId) => {
+    const sig = signatures.find((s) => s.id === sigId);
+    if (!sig) return;
+    setDescription((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${sig.content}` : sig.content));
+    toast.success(`Подпись «${sig.name}» вставлена`);
+  };
 
   useEffect(() => {
     (async () => {
@@ -171,11 +186,31 @@ export default function EditPost() {
         </div>
 
         <section>
-          <h2 className="text-lg font-bold tracking-tight mb-3">Описание</h2>
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h2 className="text-lg font-bold tracking-tight">Описание</h2>
+            <div className="flex items-center gap-2">
+              {signatures.length > 0 && (
+                <select
+                  value=""
+                  onChange={(e) => { insertSignature(e.target.value); e.target.value = ""; }}
+                  className="border border-zinc-200 px-2 py-1.5 text-sm outline-none focus:border-[#0055FF] bg-white"
+                  data-testid="insert-signature"
+                >
+                  <option value="">+ Вставить подпись…</option>
+                  {signatures.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+              )}
+              <button onClick={() => setSigOpen(true)} className="text-sm text-[#0055FF] hover:underline whitespace-nowrap" data-testid="manage-signatures-btn">
+                Подписи
+              </button>
+            </div>
+          </div>
           <MarkdownToolbar textareaRef={descRef} value={description} onChange={setDescription} />
           <Textarea ref={descRef} data-testid="edit-description" value={description} onChange={(e) => setDescription(e.target.value)}
             placeholder="Текст статьи. Поддержка: **жирный**, *курсив*, [ссылка](url), # заголовок, > цитата" className="rounded-none min-h-[120px]" />
         </section>
+
+        <SignaturesManager open={sigOpen} onOpenChange={setSigOpen} onChange={loadSignatures} />
 
         <section>
           <h2 className="text-lg font-bold tracking-tight mb-3">Хештеги</h2>
