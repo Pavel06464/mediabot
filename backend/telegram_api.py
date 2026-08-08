@@ -94,26 +94,24 @@ async def extract_thumb(path: str):
 
 
 async def extract_cover(path: str):
-    """Полноразмерный JPEG-кадр для параметра `cover` (НЕ ограничен 320px, в отличие от thumbnail).
+    """Полноразмерный JPEG ПЕРВОГО кадра видео для параметра `cover` (НЕ ограничен 320px).
 
-    Берёт кадр на ~1-й секунде (пропуская возможный чёрный интро-кадр), высокое качество q:v 2,
-    без уменьшения разрешения. Даёт чёткую обложку видео в канале.
+    Высокое качество (q:v 2), без уменьшения разрешения. Даёт чёткую обложку видео в канале.
     """
     if not shutil.which("ffmpeg"):
         return None
     fd, out = tempfile.mkstemp(prefix="cover_", suffix=".jpg")
     os.close(fd)
-    for ss in ("1", "0"):
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-ss", ss, "-i", path, "-vframes", "1", "-q:v", "2", out,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.communicate()
-            if os.path.exists(out) and os.path.getsize(out) > 0:
-                return out
-        except Exception:
-            pass
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", path, "-vframes", "1", "-q:v", "2", out,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.communicate()
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+    except Exception:
+        pass
     if os.path.exists(out):
         os.unlink(out)
     return None
