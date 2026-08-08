@@ -599,10 +599,13 @@ async def _do_publish_native(post: dict, channel: dict):
                 thumb = await telegram_api.extract_thumb(src)
                 if thumb:
                     thumb_paths.append(thumb)
-                item.update({"duration": dur, "width": w, "height": h, "thumb": thumb})
+                cover_img = await telegram_api.extract_cover(src)
+                if cover_img:
+                    thumb_paths.append(cover_img)
+                item.update({"duration": dur, "width": w, "height": h, "thumb": thumb, "cover": cover_img})
                 logger.info(
-                    "native video prep: faststart=%s thumb=%s dur=%s size=%sx%s file=%s",
-                    bool(fast), bool(thumb), dur, w, h, filename,
+                    "native video prep: faststart=%s thumb=%s cover=%s dur=%s size=%sx%s file=%s",
+                    bool(fast), bool(thumb), bool(cover_img), dur, w, h, filename,
                 )
             prepared.append(item)
 
@@ -619,6 +622,7 @@ async def _do_publish_native(post: dict, channel: dict):
                         chat_id, b["path"], b["filename"], cap,
                         thumb=b.get("thumb"), width=b.get("width"),
                         height=b.get("height"), duration=b.get("duration"),
+                        cover=b.get("cover"),
                     )
                 msg_ids.append(res.get("message_id"))
             else:

@@ -93,6 +93,32 @@ async def extract_thumb(path: str):
     return None
 
 
+async def extract_cover(path: str):
+    """Полноразмерный JPEG-кадр для параметра `cover` (НЕ ограничен 320px, в отличие от thumbnail).
+
+    Берёт кадр на ~1-й секунде (пропуская возможный чёрный интро-кадр), высокое качество q:v 2,
+    без уменьшения разрешения. Даёт чёткую обложку видео в канале.
+    """
+    if not shutil.which("ffmpeg"):
+        return None
+    fd, out = tempfile.mkstemp(prefix="cover_", suffix=".jpg")
+    os.close(fd)
+    for ss in ("1", "0"):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-ss", ss, "-i", path, "-vframes", "1", "-q:v", "2", out,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.communicate()
+            if os.path.exists(out) and os.path.getsize(out) > 0:
+                return out
+        except Exception:
+            pass
+    if os.path.exists(out):
+        os.unlink(out)
+    return None
+
+
 async def remux_faststart(path: str):
     """Перепаковывает mp4 c moov-атомом в начало (стрим + серверное превью).
 
@@ -233,82 +259,106 @@ async def send_photo_file(chat_id, path: str, filename: str, caption: str):
 
 
 async def send_video_file(chat_id, path: str, filename: str, caption: str,
-                          thumb: str = None, width=None, height=None, duration=None):
-    handles = []
-    try:
-        fh = open(path, "rb")
-        handles.append(fh)
-        files = {"video": (filename, fh, "video/mp4")}
-        form = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML", "supports_streaming": "true"}
-        if width:
-            form["width"] = str(width)
-        if height:
-            form["height"] = str(height)
-        if duration:
-            form["duration"] = str(duration)
-        if thumb:
-            tfh = open(thumb, "rb")
-            handles.append(tfh)
-            files["thumb"] = ("thumb.jpg", tfh, "image/jpeg")
-            form["thumbnail"] = "attach://thumb"
-        async with httpx.AsyncClient(timeout=_LONG) as c:
-            r = await c.post(f"{_api()}/sendVideo", data=form, files=files)
-        data = r.json()
-        if not data.get("ok"):
-            raise ValueError(data.get("description", "Ошибка Telegram"))
-        return data["result"]
-    finally:
-        for fh in handles:
-            try:
-                fh.close()
-            except Exception:
-                pass
+                          thumb: str = None, width=None, height=None, duration=None, cover: str = None):
+    async def _post(include_cover: bool):
+        handles = []
+        try:
+            fh = open(path, "rb")
+            handles.append(fh)
+            files = {"video": (filename, fh, "video/mp4")}
+            form = {"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML", "supports_streaming": "true"}
+            if width:
+                form["width"] = str(width)
+            if height:
+                form["height"] = str(height)
+            if duration:
+                form["duration"] = str(duration)
+            if thumb:
+                tfh = open(thumb, "rb")
+                handles.append(tfh)
+                files["thumb"] = ("thumb.jpg", tfh, "image/jpeg")
+                form["thumbnail"] = "attach://thumb"
+            if include_cover and cover:
+                cfh = open(cover, "rb")
+                handles.append(cfh)
+                files["cover"] = ("cover.jpg", cfh, "image/jpeg")
+                form["cover"] = "attach://cover"
+            async with httpx.AsyncClient(timeout=_LONG) as c:
+                r = await c.post(f"{_api()}/sendVideo", data=form, files=files)
+            return r.json()
+        finally:
+            for fh in handles:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+
+    data = await _post(include_cover=True)
+    if not data.get("ok") and cover:
+        # Старый Local Bot API может не знать поле cover — повторяем без него
+        data = await _post(include_cover=False)
+    if not data.get("ok"):
+        raise ValueError(data.get("description", "Ошибка Telegram"))
+    return data["result"]
 
 
 async def send_media_group_files(chat_id, items: list):
     """Альбом (2-10) multipart-ом. items: [{type, path, filename, mime, caption?,
-    (для видео) thumb?, width?, height?, duration?}]."""
-    handles = []
-    try:
-        media = []
-        files = {}
-        for i, it in enumerate(items):
-            key = f"file{i}"
-            fh = open(it["path"], "rb")
-            handles.append(fh)
-            files[key] = (it["filename"], fh, it.get("mime") or ("video/mp4" if it["type"] == "video" else "image/jpeg"))
-            m = {"type": it["type"], "media": f"attach://{key}"}
-            if it["type"] == "video":
-                m["supports_streaming"] = True
-                if it.get("width"):
-                    m["width"] = it["width"]
-                if it.get("height"):
-                    m["height"] = it["height"]
-                if it.get("duration"):
-                    m["duration"] = it["duration"]
-                if it.get("thumb"):
-                    tkey = f"thumb{i}"
-                    tfh = open(it["thumb"], "rb")
-                    handles.append(tfh)
-                    files[tkey] = ("thumb.jpg", tfh, "image/jpeg")
-                    m["thumbnail"] = f"attach://{tkey}"
-            if it.get("caption"):
-                m["caption"] = it["caption"]
-                m["parse_mode"] = "HTML"
-            media.append(m)
-        form = {"chat_id": str(chat_id), "media": json.dumps(media)}
-        async with httpx.AsyncClient(timeout=_LONG) as c:
-            r = await c.post(f"{_api()}/sendMediaGroup", data=form, files=files)
-        data = r.json()
-        if not data.get("ok"):
-            raise ValueError(data.get("description", "Ошибка Telegram"))
-        return data["result"]
-    finally:
-        for fh in handles:
-            try:
-                fh.close()
-            except Exception:
-                pass
+    (для видео) thumb?, cover?, width?, height?, duration?}]."""
+    async def _post(include_cover: bool):
+        handles = []
+        try:
+            media = []
+            files = {}
+            for i, it in enumerate(items):
+                key = f"file{i}"
+                fh = open(it["path"], "rb")
+                handles.append(fh)
+                files[key] = (it["filename"], fh, it.get("mime") or ("video/mp4" if it["type"] == "video" else "image/jpeg"))
+                m = {"type": it["type"], "media": f"attach://{key}"}
+                if it["type"] == "video":
+                    m["supports_streaming"] = True
+                    if it.get("width"):
+                        m["width"] = it["width"]
+                    if it.get("height"):
+                        m["height"] = it["height"]
+                    if it.get("duration"):
+                        m["duration"] = it["duration"]
+                    if it.get("thumb"):
+                        tkey = f"thumb{i}"
+                        tfh = open(it["thumb"], "rb")
+                        handles.append(tfh)
+                        files[tkey] = ("thumb.jpg", tfh, "image/jpeg")
+                        m["thumbnail"] = f"attach://{tkey}"
+                    if include_cover and it.get("cover"):
+                        ckey = f"cover{i}"
+                        cfh = open(it["cover"], "rb")
+                        handles.append(cfh)
+                        files[ckey] = ("cover.jpg", cfh, "image/jpeg")
+                        m["cover"] = f"attach://{ckey}"
+                if it.get("caption"):
+                    m["caption"] = it["caption"]
+                    m["parse_mode"] = "HTML"
+                media.append(m)
+            form = {"chat_id": str(chat_id), "media": json.dumps(media)}
+            async with httpx.AsyncClient(timeout=_LONG) as c:
+                r = await c.post(f"{_api()}/sendMediaGroup", data=form, files=files)
+            return r.json()
+        finally:
+            for fh in handles:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+
+    has_cover = any(it.get("cover") for it in items)
+    data = await _post(include_cover=True)
+    if not data.get("ok") and has_cover:
+        # Старый Local Bot API может не знать поле cover — повторяем без него
+        data = await _post(include_cover=False)
+    if not data.get("ok"):
+        raise ValueError(data.get("description", "Ошибка Telegram"))
+    return data["result"]
 
 
 
