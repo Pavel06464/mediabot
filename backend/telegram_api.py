@@ -294,7 +294,7 @@ async def send_video_file(chat_id, path: str, filename: str, caption: str,
                     pass
 
     data = await _post(include_cover=True)
-    if not data.get("ok") and cover:
+    if not data.get("ok") and cover and "cover" in (data.get("description") or "").lower():
         # Старый Local Bot API может не знать поле cover — повторяем без него
         data = await _post(include_cover=False)
     if not data.get("ok"):
@@ -353,7 +353,7 @@ async def send_media_group_files(chat_id, items: list):
 
     has_cover = any(it.get("cover") for it in items)
     data = await _post(include_cover=True)
-    if not data.get("ok") and has_cover:
+    if not data.get("ok") and has_cover and "cover" in (data.get("description") or "").lower():
         # Старый Local Bot API может не знать поле cover — повторяем без него
         data = await _post(include_cover=False)
     if not data.get("ok"):
