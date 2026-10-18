@@ -5,6 +5,10 @@ import asyncio
 import tempfile
 import httpx
 
+# Та же перепаковка, что и для Telegraph/R2: -c copy +faststart.
+# None — нативная отправка идёт оригинальным файлом.
+from video_prep import remux_faststart
+
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
 # Без таймаута на upload/download — большие файлы (до 2 ГБ) могут идти долго.
@@ -115,32 +119,6 @@ async def extract_cover(path: str):
     if os.path.exists(out):
         os.unlink(out)
     return None
-
-
-async def remux_faststart(path: str):
-    """Перепаковывает mp4 c moov-атомом в начало (стрим + серверное превью).
-
-    Быстро (-c copy, без перекодирования). Возвращает путь к новому файлу
-    или None, если ffmpeg нет / перепаковка не удалась (тогда шлём оригинал).
-    """
-    if not shutil.which("ffmpeg"):
-        return None
-    fd, out = tempfile.mkstemp(prefix="fast_", suffix=".mp4")
-    os.close(fd)
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-i", path, "-c", "copy", "-movflags", "+faststart", out,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-        )
-        await proc.communicate()
-        if proc.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0:
-            return out
-    except Exception:
-        pass
-    if os.path.exists(out):
-        os.unlink(out)
-    return None
-
 
 
 async def get_chat(identifier):

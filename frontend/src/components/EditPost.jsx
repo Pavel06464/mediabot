@@ -116,7 +116,7 @@ export default function EditPost() {
       api.post(`/posts/${id}/media`, form)
         .then(({ data }) => {
           setNewMedia((prev) => prev.map((m) => m.tempId === tempId
-            ? { ...m, uploading: false, url: data.url, media_id: data.media_id, r2_key: data.r2_key }
+            ? { ...m, uploading: false, url: data.url, media_id: data.media_id, r2_key: data.r2_key, size: data.size }
             : m));
         })
         .catch((e) => {
@@ -142,7 +142,7 @@ export default function EditPost() {
         hashtags,
         media: media.map((m) => ({ idx: m.idx, caption: m.caption || "", is_cover: !!m.is_cover })),
         new_media: newMedia.filter((m) => m.url).map((m) => ({
-          kind: m.kind, url: m.url, media_id: m.media_id, r2_key: m.r2_key, caption: m.caption || "", is_cover: false,
+          kind: m.kind, url: m.url, media_id: m.media_id, r2_key: m.r2_key, size: m.size, caption: m.caption || "", is_cover: false,
         })),
         channel_ref: channelRef || null,
       });

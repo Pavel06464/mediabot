@@ -22,6 +22,7 @@ from database import db, get_gridfs
 import storage
 import auth
 import telegram_api
+import video_prep
 import watermark
 from telegraph_service import create_paginated_page, edit_paginated_page
 
@@ -29,6 +30,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
+
+# Контейнеры, которые всё равно приводим к H.264/AAC MP4 (в т.ч. если браузер не прислал video/*).
+_VIDEO_EXTS = (
+    ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi", ".wmv",
+    ".flv", ".mpeg", ".mpg", ".3gp", ".ts", ".m2ts",
+)
 
 app = FastAPI(title="Media Post Bot API")
 api_router = APIRouter(prefix="/api")
@@ -88,6 +95,7 @@ class NewMediaIn(BaseModel):
     r2_key: Optional[str] = None
     caption: Optional[str] = ""
     is_cover: bool = False
+    size: Optional[int] = None  # байты сохранённого файла (лимит видео на страницу)
 
 
 class PostEditIn(BaseModel):
@@ -590,6 +598,8 @@ async def _do_publish_native(post: dict, channel: dict):
             filename, mime = telegram_api._guess(b["type"], url)
             item = {"type": b["type"], "path": path, "filename": filename, "mime": mime}
             if b["type"] == "video":
+                # Новые загрузки уже faststart MP4; повторная перепаковка дешёвая
+                # (-c copy) и чинит старые объекты, залитые как есть.
                 fast = await telegram_api.remux_faststart(path)
                 if fast:
                     tmp_paths.append(fast)
@@ -727,15 +737,49 @@ async def _stream_to_temp(file: UploadFile) -> tuple[str, int]:
 
 
 async def _store_temp(path: str, ctype: str, kind: str, filename: str):
-    ext = os.path.splitext(filename or "")[1] or (".mp4" if kind == "video" else ".jpg")
+    ext = os.path.splitext(filename or "")[1].lower() or (".mp4" if kind == "video" else ".jpg")
+    if kind == "video":
+        # iOS срывается на .MOV/.MP4 и чужих контейнерах: ключ всегда lowercase .mp4.
+        ext = video_prep.MP4_EXTENSION
+        ctype = video_prep.MP4_CONTENT_TYPE
+        filename = "video.mp4"
     if storage.r2_enabled():
-        key = f"{kind}/{uuid.uuid4()}{ext}"
+        if kind == "video":
+            key = video_prep.video_object_key(str(uuid.uuid4()))
+        else:
+            key = f"{kind}/{uuid.uuid4()}{ext}"
         url = await asyncio.to_thread(storage.upload_file, path, key, ctype)
         return url, None, key
     bucket = get_gridfs()
     with open(path, "rb") as f:
         oid = await bucket.upload_from_stream(filename or kind, f, metadata={"content_type": ctype})
     return f"{BASE_URL}/api/media/{oid}", str(oid), None
+
+
+async def _normalize_and_store_video(src_path: str):
+    """Remux/transcode to a faststart H.264/AAC MP4, then store it.
+
+    Raises HTTPException on ffmpeg failure and does not upload the original,
+    so a broken video never becomes part of a Telegraph page.
+    Returns (url, media_id, r2_key, size_bytes).
+    """
+    normalized = None
+    try:
+        try:
+            normalized = await video_prep.normalize_video(src_path)
+        except video_prep.VideoPrepError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        size = os.path.getsize(normalized)
+        url, media_id, r2_key = await _store_temp(
+            normalized, video_prep.MP4_CONTENT_TYPE, "video", "video.mp4",
+        )
+        return url, media_id, r2_key, size
+    finally:
+        if normalized and os.path.exists(normalized):
+            try:
+                os.unlink(normalized)
+            except OSError:
+                pass
 
 
 async def _finalize_post(post_id: str):
@@ -753,10 +797,11 @@ async def _finalize_post(post_id: str):
         # Статья с фото (или текстовая, если медиа нет вовсе). Текст идёт в фото-статью.
         if photos or not videos:
             photos_url, photos_paths = await create_paginated_page(post["title"], text_blocks + photos, BASE_URL)
-        # Отдельная статья с видео (по 10 медиа на страницу — видео тяжело грузятся).
+        # Отдельная статья с видео. Лимит страницы — MAX_VIDEOS_PER_PAGE
+        # (и байты) в telegraph_service: больше роликов iOS не открывает.
         if videos:
             vcontent = videos if photos else (text_blocks + videos)
-            videos_url, videos_paths = await create_paginated_page(post["title"], vcontent, BASE_URL, max_items=10)
+            videos_url, videos_paths = await create_paginated_page(post["title"], vcontent, BASE_URL)
     except Exception as e:
         logger.exception("finalize telegraph failed")
         err = str(e)
@@ -869,14 +914,18 @@ async def create_draft(payload: DraftIn, user=Depends(auth.get_current_user)):
 
 
 async def _process_upload(file: UploadFile, expected_kind: str = None):
-    """Валидирует и сохраняет загруженный файл. Возвращает (kind, url, media_id, r2_key)."""
+    """Валидирует и сохраняет загруженный файл.
+
+    Возвращает (kind, url, media_id, r2_key, size). Видео перед сохранением
+    приводится к MP4 H.264/AAC; при ошибке ffmpeg — 400, файл не заливается.
+    """
     ctype = file.content_type or "application/octet-stream"
     name = (file.filename or "").lower()
     file_kind = "video" if ctype.startswith("video") else ("photo" if ctype.startswith("image") else None)
     if file_kind is None:
         if name.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".heic", ".heif", ".bmp", ".tiff")):
             file_kind = "photo"
-        elif name.endswith((".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg")):
+        elif name.endswith(_VIDEO_EXTS):
             file_kind = "video"
     if file_kind is None:
         raise HTTPException(status_code=400, detail=f"Неизвестный тип файла «{file.filename or ctype}»")
@@ -894,16 +943,17 @@ async def _process_upload(file: UploadFile, expected_kind: str = None):
             content = await asyncio.to_thread(watermark.apply_watermark, content, wm)
             ctype = "image/jpeg"
         url, media_id, r2_key = await _store_bytes(content, ctype, "photo", file.filename or "")
+        stored_size = len(content)
     else:
         path, size = await _stream_to_temp(file)
-        if size > 5 * 1024 * 1024 * 1024:
-            os.unlink(path)
-            raise HTTPException(status_code=400, detail="Видео больше 5 ГБ")
         try:
-            url, media_id, r2_key = await _store_temp(path, ctype, "video", file.filename or "")
+            if size > 5 * 1024 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="Видео больше 5 ГБ")
+            url, media_id, r2_key, stored_size = await _normalize_and_store_video(path)
         finally:
-            os.unlink(path)
-    return file_kind, url, media_id, r2_key
+            if os.path.exists(path):
+                os.unlink(path)
+    return file_kind, url, media_id, r2_key, stored_size
 
 
 @api_router.post("/posts/{post_id}/media/{idx}")
@@ -916,9 +966,9 @@ async def upload_media_slot(post_id: str, idx: int, file: UploadFile = File(...)
         raise HTTPException(status_code=400, detail="Неверный слот")
 
     slot_kind = blocks[idx]["type"]
-    _kind, url, media_id, r2_key = await _process_upload(file, expected_kind=slot_kind)
+    _kind, url, media_id, r2_key, stored_size = await _process_upload(file, expected_kind=slot_kind)
 
-    set_fields = {f"blocks.{idx}.url": url, f"blocks.{idx}.pending": False}
+    set_fields = {f"blocks.{idx}.url": url, f"blocks.{idx}.pending": False, f"blocks.{idx}.size": stored_size}
     if media_id:
         set_fields[f"blocks.{idx}.media_id"] = media_id
     if r2_key:
@@ -948,8 +998,8 @@ async def upload_edit_media(post_id: str, file: UploadFile = File(...), user=Dep
     post = await db.posts.find_one({"id": post_id}, {"_id": 1})
     if not post:
         raise HTTPException(status_code=404, detail="Пост не найден")
-    kind, url, media_id, r2_key = await _process_upload(file)
-    return {"kind": kind, "url": url, "media_id": media_id, "r2_key": r2_key}
+    kind, url, media_id, r2_key, stored_size = await _process_upload(file)
+    return {"kind": kind, "url": url, "media_id": media_id, "r2_key": r2_key, "size": stored_size}
 
 
 async def _publish_and_store(post: dict) -> dict:
@@ -1357,7 +1407,7 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
     for nm in payload.new_media:
         if nm.kind not in ("photo", "video") or not nm.url:
             continue
-        blocks.append({
+        block = {
             "type": nm.kind,
             "is_cover": bool(nm.is_cover),
             "caption": nm.caption or "",
@@ -1365,7 +1415,10 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
             "media_id": nm.media_id,
             "r2_key": nm.r2_key,
             "pending": False,
-        })
+        }
+        if nm.size:
+            block["size"] = int(nm.size)
+        blocks.append(block)
 
     tags = _normalize_tags(payload.hashtags)
     desc = (payload.description or "").strip()
@@ -1439,9 +1492,9 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
             # Видео-статья: аналогично.
             if videos:
                 if videos_paths:
-                    videos_url, videos_paths = await edit_paginated_page(videos_paths, title, vcontent, BASE_URL, max_items=10)
+                    videos_url, videos_paths = await edit_paginated_page(videos_paths, title, vcontent, BASE_URL)
                 else:
-                    videos_url, videos_paths = await create_paginated_page(title, vcontent, BASE_URL, max_items=10)
+                    videos_url, videos_paths = await create_paginated_page(title, vcontent, BASE_URL)
             else:
                 videos_url, videos_paths = None, []
         else:
@@ -1489,9 +1542,23 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
 # ---------- Upload ----------
 @api_router.post("/upload")
 async def upload(file: UploadFile = File(...), user=Depends(auth.get_current_user)):
-    content = await file.read()
     ctype = file.content_type or "application/octet-stream"
-    kind = "video" if ctype.startswith("video") else "photo"
+    name = (file.filename or "").lower()
+    if ctype.startswith("video") or (not ctype.startswith("image") and name.endswith(_VIDEO_EXTS)):
+        path, size = await _stream_to_temp(file)
+        try:
+            if size > 5 * 1024 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="Видео больше 5 ГБ")
+            url, media_id, r2_key, _stored = await _normalize_and_store_video(path)
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+        if r2_key:
+            return {"url": url, "type": "video"}
+        return {"url": url, "media_id": media_id, "type": "video"}
+
+    content = await file.read()
+    kind = "photo"
 
     # Водяной знак — только для фото
     if kind == "photo":
@@ -1500,8 +1567,8 @@ async def upload(file: UploadFile = File(...), user=Depends(auth.get_current_use
             content = await asyncio.to_thread(watermark.apply_watermark, content, wm)
             ctype = "image/jpeg"
 
-    ext = os.path.splitext(file.filename or "")[1] or (".mp4" if kind == "video" else ".jpg")
-    if kind == "photo" and ctype == "image/jpeg":
+    ext = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
+    if ctype == "image/jpeg":
         ext = ".jpg"
 
     if storage.r2_enabled():
