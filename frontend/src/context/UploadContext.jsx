@@ -5,6 +5,9 @@ import api from "@/lib/api";
 const UploadContext = createContext(null);
 
 const STALL_MS = 90000; // если данные не идут 90с — считаем обрыв и повторяем
+// Файл уже на сервере: ffmpeg может перепаковывать или перекодировать видео.
+// nginx ждёт ответ до 3600с — не обрываем эту фазу коротким stall-таймаутом.
+const PROCESS_MS = 55 * 60 * 1000;
 const MAX_ATTEMPTS = 3;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -31,11 +34,11 @@ export function UploadProvider({ children }) {
   const uploadOne = (postId, slot, file, onProg) => {
     const controller = new AbortController();
     let timer;
-    const resetStall = () => {
+    const arm = (ms) => {
       clearTimeout(timer);
-      timer = setTimeout(() => controller.abort(), STALL_MS);
+      timer = setTimeout(() => controller.abort(), ms);
     };
-    resetStall();
+    arm(STALL_MS);
     const fd = new FormData();
     fd.append("file", file);
     return api
@@ -43,7 +46,8 @@ export function UploadProvider({ children }) {
         headers: { "Content-Type": "multipart/form-data" },
         signal: controller.signal,
         onUploadProgress: (e) => {
-          resetStall();
+          const uploaded = e.total && e.loaded >= e.total;
+          arm(uploaded ? PROCESS_MS : STALL_MS);
           onProg(e.total ? Math.round((e.loaded / e.total) * 100) : 0);
         },
       })

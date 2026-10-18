@@ -23,8 +23,9 @@ from aiogram.types import (
 )
 
 from database import db, get_gridfs
-from telegraph_service import create_post_page
+from telegraph_service import create_paginated_page
 import storage
+import video_prep
 
 logger = logging.getLogger("telegram_bot")
 
@@ -98,35 +99,68 @@ def back_menu_kb() -> InlineKeyboardMarkup:
 
 
 # ---------- Helpers ----------
-async def _store_media(file_id: str, content_type: str, kind: str) -> dict:
-    """Возвращает dict с 'url' (публичная ссылка на медиа) и опц. 'media_id' (для GridFS)."""
-    file = await bot.get_file(file_id)
+def _unlink_quiet(path: str) -> None:
+    if path and os.path.exists(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
-    if storage.r2_enabled():
-        ext = "mp4" if kind == "video" else "jpg"
-        key = f"{kind}/{uuid.uuid4()}.{ext}"
-        if LOCAL_API:
-            # при is_local=True file.file_path — путь к файлу на диске (общий том с API-сервером)
-            url = await asyncio.to_thread(storage.upload_file, file.file_path, key, content_type)
+
+async def _store_media(file_id: str, content_type: str, kind: str) -> dict:
+    """Возвращает dict с 'url' (публичная ссылка на медиа) и опц. 'media_id' (для GridFS).
+
+    Видео перед сохранением приводится к MP4 H.264/AAC с moov перед mdat.
+    VideoPrepError пробрасывается — страницу в этом случае создавать нельзя.
+    """
+    file = await bot.get_file(file_id)
+    src = None
+    owned_src = False
+    normalized = None
+    try:
+        local_path = file.file_path if LOCAL_API and file.file_path and os.path.isfile(file.file_path) else None
+        if local_path:
+            src = local_path
         else:
             buf = await bot.download_file(file.file_path)
             tmp = tempfile.NamedTemporaryFile(delete=False)
             tmp.write(buf.read())
             tmp.close()
-            try:
-                url = await asyncio.to_thread(storage.upload_file, tmp.name, key, content_type)
-            finally:
-                os.unlink(tmp.name)
-        return {"url": url}
+            src = tmp.name
+            owned_src = True
 
-    # Fallback: хранение в MongoDB GridFS, отдача через /api/media/{id}
-    buf = await bot.download_file(file.file_path)
-    data = buf.read()
-    bucket = get_gridfs()
-    oid = await bucket.upload_from_stream(
-        f"{kind}_{file_id}", data, metadata={"content_type": content_type}
-    )
-    return {"media_id": str(oid), "url": f"{BASE_URL}/api/media/{oid}"}
+        if kind == "video":
+            normalized = await video_prep.normalize_video(src)
+            upload_path = normalized
+            content_type = video_prep.MP4_CONTENT_TYPE
+            filename = "video.mp4"
+            size = os.path.getsize(upload_path)
+        else:
+            upload_path = src
+            filename = f"{kind}_{file_id}"
+            size = None
+
+        if storage.r2_enabled():
+            if kind == "video":
+                key = video_prep.video_object_key(str(uuid.uuid4()))
+            else:
+                key = f"{kind}/{uuid.uuid4()}.jpg"
+            url = await asyncio.to_thread(storage.upload_file, upload_path, key, content_type)
+            out = {"url": url, "r2_key": key}
+        else:
+            bucket = get_gridfs()
+            with open(upload_path, "rb") as fh:
+                oid = await bucket.upload_from_stream(
+                    filename, fh, metadata={"content_type": content_type}
+                )
+            out = {"media_id": str(oid), "url": f"{BASE_URL}/api/media/{oid}"}
+        if size is not None:
+            out["size"] = size
+        return out
+    finally:
+        if owned_src:
+            _unlink_quiet(src)
+        _unlink_quiet(normalized)
 
 
 async def get_user_channel(user_id: int):
@@ -222,7 +256,11 @@ async def fsm_photo(message: Message, state: FSMContext):
 async def fsm_video(message: Message, state: FSMContext):
     data = await state.get_data()
     blocks = data.get("blocks", [])
-    media_id = await _store_media(message.video.file_id, message.video.mime_type or "video/mp4", "video")
+    try:
+        media_id = await _store_media(message.video.file_id, message.video.mime_type or "video/mp4", "video")
+    except video_prep.VideoPrepError as e:
+        await message.answer(f"❌ {e}", reply_markup=content_kb())
+        return
     blocks.append({"type": "video", "caption": message.caption or "", **media_id})
     await state.update_data(blocks=blocks)
     await message.answer(f"🎬 Видео добавлено. Элементов: {len(blocks)}", reply_markup=content_kb())
@@ -236,7 +274,11 @@ async def fsm_document(message: Message, state: FSMContext):
         data = await state.get_data()
         blocks = data.get("blocks", [])
         kind = "photo" if mime.startswith("image/") else "video"
-        media_id = await _store_media(doc.file_id, mime, kind)
+        try:
+            media_id = await _store_media(doc.file_id, mime, kind)
+        except video_prep.VideoPrepError as e:
+            await message.answer(f"❌ {e}", reply_markup=content_kb())
+            return
         blocks.append({"type": kind, "caption": message.caption or "", **media_id})
         await state.update_data(blocks=blocks)
         await message.answer(f"📎 Медиа добавлено. Элементов: {len(blocks)}", reply_markup=content_kb())
@@ -271,7 +313,8 @@ async def cb_done(cb: CallbackQuery, state: FSMContext):
 
     await cb.message.edit_text("⏳ Создаю статью Telegraph...")
     try:
-        url, path = await create_post_page(title, blocks, BASE_URL)
+        url, paths = await create_paginated_page(title, blocks, BASE_URL)
+        path = paths[0] if paths else None
     except Exception as e:
         logger.exception("Telegraph create failed")
         await cb.message.edit_text(f"❌ Ошибка при создании статьи: {e}", reply_markup=main_menu_kb())

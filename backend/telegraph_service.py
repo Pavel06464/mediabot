@@ -143,17 +143,64 @@ async def edit_post_page(path: str, title: str, blocks, base_url: str, author_na
 # ---- Пагинация: Telegraph ограничивает контент (~64 КБ). Большие альбомы бьём на страницы. ----
 MAX_HTML = 40000  # безопасный порог размера html одной страницы
 
+# iOS (Safari и встроенный браузер Telegram) показывает белый экран, если на
+# странице Telegraph слишком много <video> или они слишком тяжёлые: Telegraph
+# ставит preload=auto на каждое видео. Это единственный лимит для видео-страниц.
+MAX_VIDEOS_PER_PAGE = 4
+MAX_VIDEO_BYTES_PER_PAGE = 36 * 1024 * 1024  # ~36 МиБ, внутри диапазона 30–40 МБ
+
+
+def _video_bytes(block) -> int:
+    """Stored byte size of a video block. Unknown/legacy blocks count as 0."""
+    if block.get("type") != "video":
+        return 0
+    try:
+        n = int(block.get("size") or 0)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
 
 def _chunk_blocks(blocks, base_url, max_items=None):
-    chunks, cur, size = [], [], 0
+    """Split blocks into Telegraph pages.
+
+    max_items, when set, caps how many blocks of any type share a page.
+    Video blocks are always also limited by MAX_VIDEOS_PER_PAGE and
+    MAX_VIDEO_BYTES_PER_PAGE. Those constants are the iOS-safe limits;
+    max_items cannot raise them. A single video larger than the byte cap
+    still gets its own page. Text blocks do not consume video slots.
+    """
+    chunks, cur = [], []
+    html_size = 0
+    video_count = 0
+    video_bytes = 0
+
+    def flush():
+        nonlocal cur, html_size, video_count, video_bytes
+        chunks.append(cur)
+        cur = []
+        html_size = 0
+        video_count = 0
+        video_bytes = 0
+
     for b in blocks:
         bl = len(build_html([b], base_url))
-        too_big = cur and (size + bl > MAX_HTML or (max_items and len(cur) >= max_items))
-        if too_big:
-            chunks.append(cur)
-            cur, size = [], 0
+        is_video = b.get("type") == "video"
+        b_bytes = _video_bytes(b) if is_video else 0
+        if cur:
+            over_html = html_size + bl > MAX_HTML
+            over_items = bool(max_items) and len(cur) >= max_items
+            over_videos = is_video and video_count >= MAX_VIDEOS_PER_PAGE
+            over_bytes = (
+                is_video and b_bytes > 0 and video_bytes + b_bytes > MAX_VIDEO_BYTES_PER_PAGE
+            )
+            if over_html or over_items or over_videos or over_bytes:
+                flush()
         cur.append(b)
-        size += bl
+        html_size += bl
+        if is_video:
+            video_count += 1
+            video_bytes += b_bytes
     if cur:
         chunks.append(cur)
     return chunks or [[]]
