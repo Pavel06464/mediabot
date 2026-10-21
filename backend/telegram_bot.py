@@ -30,20 +30,19 @@ import video_prep
 logger = logging.getLogger("telegram_bot")
 
 BASE_URL = os.environ.get("PUBLIC_BASE_URL", "").rstrip("/")
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 LOCAL_API = os.environ.get("TELEGRAM_LOCAL_API_URL")  # напр. http://localhost:8081
 
 bot: Bot | None = None
 router = Router()
 
 
-def _build_bot() -> Bot:
+def _build_bot(token: str) -> Bot:
     kwargs = {"default": DefaultBotProperties(parse_mode=ParseMode.HTML)}
     if LOCAL_API:
         session = AiohttpSession(api=TelegramAPIServer.from_base(LOCAL_API, is_local=True))
         kwargs["session"] = session
         logger.info("Using Local Bot API Server at %s", LOCAL_API)
-    return Bot(token=TOKEN, **kwargs)
+    return Bot(token=token, **kwargs)
 
 
 class PostFSM(StatesGroup):
@@ -490,17 +489,93 @@ async def fsm_channel(message: Message, state: FSMContext):
     )
 
 
+# ---------- Управление polling (перезапуск без рестарта бэкенда) ----------
+_dp: Dispatcher | None = None
+_task: asyncio.Task | None = None
+_lock = asyncio.Lock()
+_last_error: str | None = None
+
+
+def is_running() -> bool:
+    return _task is not None and not _task.done()
+
+
+def last_error() -> str | None:
+    return _last_error
+
+
+async def _run_polling(b: Bot, dp: Dispatcher):
+    global _last_error
+    try:
+        await b.delete_webhook(drop_pending_updates=True)
+        logger.info("Telegram bot polling started")
+        await dp.start_polling(b, handle_signals=False, close_bot_session=False)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        # Сообщение исключения aiogram не содержит токен.
+        _last_error = f"{type(e).__name__}: {e}"
+        logger.warning("Bot polling crashed: %s", type(e).__name__)
+
+
+async def _stop_locked():
+    global bot, _dp, _task
+    if _dp is not None and is_running():
+        try:
+            await _dp.stop_polling()
+        except Exception:
+            pass
+    if _task is not None:
+        try:
+            await asyncio.wait_for(asyncio.shield(_task), timeout=10)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            _task.cancel()
+            try:
+                await _task
+            except BaseException:
+                pass
+    if bot is not None:
+        try:
+            await bot.session.close()
+        except Exception:
+            pass
+    # Отцепляем router от старого Dispatcher, иначе aiogram не даст подключить его к новому.
+    if _dp is not None:
+        try:
+            _dp.sub_routers.remove(router)
+        except ValueError:
+            pass
+    router._parent_router = None
+    bot, _dp, _task = None, None, None
+
+
+async def stop_bot():
+    async with _lock:
+        await _stop_locked()
+        logger.info("Telegram bot polling stopped")
+
+
+async def restart_bot(token: str | None, polling: bool) -> bool:
+    """Останавливает текущий polling (если есть) и запускает новый. Два поллера одновременно не бывает."""
+    global bot, _dp, _task, _last_error
+    async with _lock:
+        await _stop_locked()
+        _last_error = None
+        if not (polling and token):
+            logger.info("Bot polling disabled (dashboard-only mode)")
+            return False
+        bot = _build_bot(token)
+        _dp = Dispatcher(storage=MemoryStorage())
+        _dp.include_router(router)
+        _task = asyncio.create_task(_run_polling(bot, _dp))
+        return True
+
+
 async def start_bot():
-    global bot
-    if not TOKEN:
+    """Совместимость: старт по текущим настройкам (БД > env)."""
+    import bot_config
+    cfg = await bot_config.load(db)
+    if not cfg["token"]:
         logger.warning("TELEGRAM_BOT_TOKEN not set, bot not started")
         return
-    bot = _build_bot()
-    dp = Dispatcher(storage=MemoryStorage())
-    dp.include_router(router)
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Telegram bot polling started")
-        await dp.start_polling(bot)
-    except Exception:
-        logger.exception("Bot polling crashed")
+    await restart_bot(cfg["token"], True)

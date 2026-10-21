@@ -22,6 +22,7 @@ from database import db, get_gridfs
 import storage
 import auth
 import telegram_api
+import bot_config
 import video_prep
 import watermark
 from telegraph_service import create_paginated_page, edit_paginated_page
@@ -1242,8 +1243,8 @@ async def list_channels(user=Depends(auth.get_current_user)):
 
 @api_router.post("/channels")
 async def add_channel(payload: ChannelIn, user=Depends(auth.get_current_user)):
-    if not os.environ.get("TELEGRAM_BOT_TOKEN"):
-        raise HTTPException(status_code=400, detail="Не задан TELEGRAM_BOT_TOKEN на сервере")
+    if not bot_config.current_token():
+        raise HTTPException(status_code=400, detail="Не задан токен Telegram-бота (Настройки → Бот)")
     try:
         chat = await telegram_api.get_chat(payload.identifier.strip())
     except Exception as e:
@@ -1615,8 +1616,8 @@ async def get_settings(user=Depends(auth.get_current_user)):
 
 @api_router.post("/settings/channel")
 async def set_channel(payload: ChannelIn, user=Depends(auth.get_current_user)):
-    if not os.environ.get("TELEGRAM_BOT_TOKEN"):
-        raise HTTPException(status_code=400, detail="Не задан TELEGRAM_BOT_TOKEN на сервере")
+    if not bot_config.current_token():
+        raise HTTPException(status_code=400, detail="Не задан токен Telegram-бота (Настройки → Бот)")
     try:
         chat = await telegram_api.get_chat(payload.identifier.strip())
     except Exception as e:
@@ -1665,6 +1666,81 @@ async def set_watermark(payload: WatermarkIn, user=Depends(auth.get_current_user
 async def preview_watermark(payload: WatermarkIn, user=Depends(auth.get_current_user)):
     img = await asyncio.to_thread(watermark.make_preview, payload.model_dump())
     return {"image": img}
+
+
+
+# ---------- Telegram bot settings ----------
+class BotSettingsIn(BaseModel):
+    token: Optional[str] = None          # новый токен; None — не менять
+    clear_token: bool = False            # удалить токен из БД (вернуться к env)
+    polling_enabled: Optional[bool] = None
+
+
+class BotCheckIn(BaseModel):
+    token: Optional[str] = None          # проверить введённый (ещё не сохранённый) токен
+
+
+_TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
+
+
+async def _bot_settings_view(check: bool = False) -> dict:
+    cfg = await bot_config.load(db)
+    from telegram_bot import is_running, last_error
+    out = {
+        "token_masked": bot_config.mask(cfg["token"]),
+        "source": cfg["source"],
+        "polling_enabled": cfg["polling"],
+        "polling_source": cfg["polling_source"],
+        "polling_running": is_running(),
+        "polling_error": last_error(),
+        "local_api": bool((os.environ.get("TELEGRAM_LOCAL_API_URL") or "").strip()),
+    }
+    if check:
+        out["check"] = await bot_config.check_token(cfg["token"])
+    return out
+
+
+@api_router.get("/settings/bot")
+async def get_bot_settings(check: bool = False, user=Depends(auth.get_current_user)):
+    return await _bot_settings_view(check)
+
+
+@api_router.put("/settings/bot")
+async def set_bot_settings(payload: BotSettingsIn, user=Depends(auth.get_current_user)):
+    upd, unset = {}, {}
+    if payload.clear_token:
+        unset["token"] = ""
+    elif payload.token is not None and payload.token.strip():
+        tok = payload.token.strip()
+        if not _TOKEN_RE.match(tok):
+            raise HTTPException(status_code=400, detail="Неверный формат токена (ожидается 123456:ABC...)")
+        upd["token"] = tok
+    if payload.polling_enabled is not None:
+        upd["polling_enabled"] = payload.polling_enabled
+    if upd or unset:
+        upd["updated_at"] = datetime.now(timezone.utc).isoformat()
+        op = {"$set": upd}
+        if unset:
+            op["$unset"] = unset
+        await db.app_config.update_one({"_id": bot_config.CONFIG_ID}, op, upsert=True)
+    cfg = await bot_config.load(db)
+    from telegram_bot import restart_bot
+    await restart_bot(cfg["token"], cfg["polling"])
+    return await _bot_settings_view(check=True)
+
+
+@api_router.post("/settings/bot/check")
+async def check_bot_settings(payload: BotCheckIn, user=Depends(auth.get_current_user)):
+    token = (payload.token or "").strip() or (await bot_config.load(db))["token"]
+    return await bot_config.check_token(token)
+
+
+@api_router.post("/settings/bot/restart")
+async def restart_bot_endpoint(user=Depends(auth.get_current_user)):
+    cfg = await bot_config.load(db)
+    from telegram_bot import restart_bot
+    await restart_bot(cfg["token"], cfg["polling"])
+    return await _bot_settings_view(check=True)
 
 
 app.include_router(api_router)
@@ -1733,9 +1809,19 @@ async def on_startup():
     await auth.seed_admin()
     asyncio.create_task(_scheduler_loop())
     logger.info("Scheduler loop started")
-    if os.environ.get("ENABLE_BOT_POLLING") == "1" and os.environ.get("TELEGRAM_BOT_TOKEN"):
-        from telegram_bot import start_bot
-        asyncio.create_task(start_bot())
-        logger.info("Bot polling enabled")
+    cfg = await bot_config.load(db)
+    if cfg["polling"] and cfg["token"]:
+        from telegram_bot import restart_bot
+        await restart_bot(cfg["token"], True)
+        logger.info("Bot polling enabled (token source: %s)", cfg["source"])
     else:
         logger.info("Bot polling disabled (dashboard-only mode)")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        from telegram_bot import stop_bot
+        await stop_bot()
+    except Exception:
+        pass

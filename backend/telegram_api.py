@@ -5,6 +5,8 @@ import asyncio
 import tempfile
 import httpx
 
+import bot_config
+
 # Та же перепаковка, что и для Telegraph/R2: -c copy +faststart.
 # None — нативная отправка идёт оригинальным файлом.
 from video_prep import remux_faststart
@@ -17,12 +19,12 @@ _LONG = httpx.Timeout(None)
 
 def _base() -> str:
     """Базовый URL Telegram Bot API: Local Bot API Server, если задан, иначе облако."""
-    local = (os.environ.get("TELEGRAM_LOCAL_API_URL") or "").strip().rstrip("/")
-    return local or "https://api.telegram.org"
+    return bot_config.api_base()
 
 
 def _api() -> str:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    # Токен из настроек (БД) с fallback на env — меняется без рестарта бэкенда.
+    token = bot_config.current_token()
     return f"{_base()}/bot{token}"
 
 

@@ -54,6 +54,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useUpload } from "@/context/UploadContext";
 import ChannelSettings from "@/components/ChannelSettings";
 import WatermarkSettings from "@/components/WatermarkSettings";
+import BotSettings from "@/components/BotSettings";
 import SchedulerSettings from "@/components/SchedulerSettings";
 
 const fmtDate = (iso) => {
@@ -116,6 +117,7 @@ export default function Dashboard() {
   const [publishing, setPublishing] = useState(null);
   const [channelOpen, setChannelOpen] = useState(false);
   const [watermarkOpen, setWatermarkOpen] = useState(false);
+  const [botOpen, setBotOpen] = useState(false);
   const [schedulerOpen, setSchedulerOpen] = useState(false);
   const [scheduleTarget, setScheduleTarget] = useState(null);
   const [scheduleValue, setScheduleValue] = useState("");
@@ -334,6 +336,7 @@ export default function Dashboard() {
     <div className="min-h-screen bg-[#F9FAFB]">
       <ChannelSettings open={channelOpen} onOpenChange={setChannelOpen} onChange={load} />
       <WatermarkSettings open={watermarkOpen} onOpenChange={setWatermarkOpen} />
+      <BotSettings open={botOpen} onOpenChange={setBotOpen} />
       <SchedulerSettings open={schedulerOpen} onOpenChange={setSchedulerOpen} onChange={load} />
 
       <Dialog open={bulkOpen} onOpenChange={(o) => !o && setBulkOpen(false)}>
@@ -497,6 +500,9 @@ export default function Dashboard() {
             </Button>
             <Button onClick={() => setWatermarkOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="watermark-settings-btn">
               <Droplets className="h-4 w-4 mr-2" /> Знак
+            </Button>
+            <Button onClick={() => setBotOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="bot-settings-btn">
+              <Settings className="h-4 w-4 mr-2" /> Бот
             </Button>
             <Button onClick={load} variant="outline" className="rounded-none border-zinc-200" data-testid="refresh-btn">
               <RefreshCw className="h-4 w-4" />
