@@ -136,7 +136,7 @@ export default function EditPost() {
     if (newMedia.some((m) => m.uploading)) return toast.error("Дождитесь загрузки новых файлов");
     setSaving(true);
     try {
-      await api.put(`/posts/${id}`, {
+      const { data } = await api.put(`/posts/${id}`, {
         title: title.trim(),
         description: description.trim(),
         hashtags,
@@ -146,7 +146,12 @@ export default function EditPost() {
         })),
         channel_ref: channelRef || null,
       });
-      toast.success("Пост обновлён");
+      const sync = data?.telegram_sync;
+      if (sync?.status === "ok") toast.success("Пост обновлён. Подпись в канале обновлена.");
+      else if (sync?.status === "already_same") toast.success("Пост обновлён. Подпись в канале уже актуальная.");
+      else if (sync?.status === "skip") toast.success(`Пост обновлён. ${sync.message || "Подпись в канале не отправлялась."}`);
+      else if (sync) toast.warning(`Пост сохранён, но подпись в канале не обновилась: ${sync.message || "ошибка"}`);
+      else toast.success("Пост обновлён");
       navigate("/");
     } catch (e) {
       toast.error(e.response?.data?.detail || "Ошибка сохранения");

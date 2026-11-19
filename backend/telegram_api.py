@@ -4,6 +4,41 @@ import shutil
 import asyncio
 import tempfile
 import httpx
+import re as _re
+
+class TelegramError(Exception):
+    """Ошибка Bot API. retry_after — секунды из 429, если Telegram их прислал."""
+    def __init__(self, description: str, error_code=None, retry_after=None):
+        super().__init__(description)
+        self.description = description or "Ошибка Telegram"
+        self.error_code = error_code
+        self.retry_after = retry_after
+
+    @classmethod
+    def from_payload(cls, data: dict, status_code=None):
+        data = data or {}
+        desc = data.get("description") or "Ошибка Telegram"
+        code = data.get("error_code") or status_code
+        retry = None
+        params = data.get("parameters") or {}
+        if params.get("retry_after") is not None:
+            try:
+                retry = float(params["retry_after"])
+            except (TypeError, ValueError):
+                retry = None
+        if retry is None:
+            m = _re.search(r"retry after\s+(\d+)", str(desc), _re.I)
+            if m:
+                retry = float(m.group(1))
+        return cls(desc, code, retry)
+
+    def is_not_modified(self) -> bool:
+        return "not modified" in self.description.lower()
+
+
+def _raise_if_not_ok(data, status_code=None):
+    if not (data or {}).get("ok"):
+        raise TelegramError.from_payload(data or {}, status_code)
 
 import bot_config
 
@@ -179,22 +214,30 @@ async def delete_message(chat_id, message_id):
 
 async def edit_message_caption(chat_id, message_id, caption: str):
     async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.post(f"{_api()}/editMessageCaption",
-                         json={"chat_id": chat_id, "message_id": message_id, "caption": caption, "parse_mode": "HTML"})
-        data = r.json()
-        if not data.get("ok"):
-            raise ValueError(data.get("description", "Ошибка Telegram"))
+        r = await c.post(
+            f"{_api()}/editMessageCaption",
+            json={"chat_id": chat_id, "message_id": message_id, "caption": caption, "parse_mode": "HTML"},
+        )
+        try:
+            data = r.json()
+        except Exception:
+            data = {"ok": False, "description": f"HTTP {r.status_code}"}
+        _raise_if_not_ok(data, r.status_code)
         return True
 
 
 async def edit_message_text(chat_id, message_id, text: str):
     async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.post(f"{_api()}/editMessageText",
-                         json={"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML",
-                               "disable_web_page_preview": False})
-        data = r.json()
-        if not data.get("ok"):
-            raise ValueError(data.get("description", "Ошибка Telegram"))
+        r = await c.post(
+            f"{_api()}/editMessageText",
+            json={"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML",
+                  "disable_web_page_preview": False},
+        )
+        try:
+            data = r.json()
+        except Exception:
+            data = {"ok": False, "description": f"HTTP {r.status_code}"}
+        _raise_if_not_ok(data, r.status_code)
         return True
 
 

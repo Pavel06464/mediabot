@@ -195,6 +195,12 @@ export default function Dashboard() {
   const [bulkRunning, setBulkRunning] = useState(false);
   const [bulkPreview, setBulkPreview] = useState(null);
   const [bulkJob, setBulkJob] = useState(null);
+  const [resyncOpen, setResyncOpen] = useState(false);
+  const [resyncScope, setResyncScope] = useState("channel"); // channel | selected
+  const [resyncJob, setResyncJob] = useState(null);
+  const [resyncStarting, setResyncStarting] = useState(false);
+  const [resyncingId, setResyncingId] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]);
 
   const bulkPayload = (dryRun) => ({
     find: bulkFind.trim(),
@@ -262,6 +268,8 @@ export default function Dashboard() {
 
   useEffect(() => { load(); }, [load]);
 
+  useEffect(() => { setSelectedIds([]); }, [page, q, selectedChannel, sortBy, sortDir]);
+
   useEffect(() => {
     if (!bulkJob?.id || (bulkJob.status && bulkJob.status !== "running")) return undefined;
     let stopped = false;
@@ -284,6 +292,28 @@ export default function Dashboard() {
     return () => { stopped = true; clearInterval(t); };
   }, [bulkJob?.id, bulkJob?.status, load]);
 
+  useEffect(() => {
+    if (!resyncJob?.id || (resyncJob.status && resyncJob.status !== "running")) return undefined;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const { data } = await api.get(`/posts/resync-captions/${resyncJob.id}`);
+        if (stopped) return;
+        setResyncJob(data);
+        if (data.status === "done" || data.status === "error") {
+          const errN = (data.errors || []).length;
+          if (data.status === "error") toast.error(data.message || "Обновление подписей оборвалось");
+          else if (errN) toast.warning(`Готово: обновлено ${data.ok || 0}, уже так ${data.already_same || 0}, ошибок ${errN}`);
+          else toast.success(`Готово: обновлено ${data.ok || 0}, уже актуальные ${data.already_same || 0}`);
+          setTimeout(load, 500);
+        }
+      } catch { /* опрос продолжим */ }
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => { stopped = true; clearInterval(t); };
+  }, [resyncJob?.id, resyncJob?.status, load]);
+
   // Пока идут фоновые загрузки — обновляем таблицу, чтобы видеть смену статусов
   useEffect(() => {
     if (jobs.length === 0) { load(); return; }
@@ -292,6 +322,55 @@ export default function Dashboard() {
   }, [jobs.length, load]);
 
   const copyLink = (url) => { navigator.clipboard.writeText(url); toast.success("Ссылка скопирована"); };
+
+  const publishedOnPage = posts.filter((p) => p.published);
+  const allPageSelected = publishedOnPage.length > 0 && publishedOnPage.every((p) => selectedIds.includes(p.id));
+  const toggleSelected = (id) => {
+    setSelectedIds((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  };
+  const toggleSelectPage = () => {
+    if (allPageSelected) setSelectedIds((cur) => cur.filter((id) => !publishedOnPage.some((p) => p.id === id)));
+    else setSelectedIds((cur) => Array.from(new Set([...cur, ...publishedOnPage.map((p) => p.id)])));
+  };
+
+  const startResync = async () => {
+    if (resyncScope === "channel" && !selectedChannel) return toast.error("Сначала выберите канал");
+    if (resyncScope === "selected" && !selectedIds.length) return toast.error("Отметьте посты в таблице");
+    setResyncStarting(true);
+    try {
+      const body = resyncScope === "selected"
+        ? { post_ids: selectedIds }
+        : { channel_ref: selectedChannel };
+      const { data } = await api.post("/posts/resync-captions", body);
+      if (!data.job_id) {
+        toast.info(data.message || "Нет опубликованных постов с сообщением в канале");
+        setResyncJob(null);
+      } else {
+        setResyncJob({ id: data.job_id, status: "running", total: data.total || data.started || 0, processed: 0, sent: 0, ok: 0, already_same: 0, skipped: 0, errors: [] });
+      }
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Не удалось запустить обновление подписей");
+    } finally {
+      setResyncStarting(false);
+    }
+  };
+
+  const resyncOne = async (p) => {
+    if (!p.published) return toast.error("Пост ещё не опубликован в канале");
+    setResyncingId(p.id);
+    try {
+      const { data } = await api.post(`/posts/${p.id}/resync-caption`);
+      if (data.status === "ok") toast.success("Подпись в канале обновлена");
+      else if (data.status === "already_same") toast.success("Подпись в канале уже актуальная");
+      else if (data.status === "skip") toast.info(data.message || "Пропущено");
+      else toast.error(data.message || "Не удалось обновить подпись");
+      load();
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Ошибка обновления подписи");
+    } finally {
+      setResyncingId(null);
+    }
+  };
 
   const publish = async (id) => {
     if (!channels.length) { toast.error("Сначала добавьте канал"); setSchedulerOpen(true); return; }
@@ -466,6 +545,7 @@ export default function Dashboard() {
                   <div>Найдено постов: {bulkPreview?.matched ?? "—"}</div>
                   <div>Обновлено в базе: {bulkJob.updated_db || 0} / {bulkJob.total || 0}</div>
                   <div>Обновлено в Telegram: {bulkJob.updated_telegram || 0} / {bulkJob.total || 0}</div>
+                  {!!bulkJob.already_same && <div>Подпись уже актуальная: {bulkJob.already_same}</div>}
                   {(bulkJob.skipped_noop > 0) && <div>Без изменений (уже нужный текст): {bulkJob.skipped_noop}</div>}
                   {!!bulkJob.signatures_updated && <div>Подписей обновлено: {bulkJob.signatures_updated}</div>}
                   <div>Ошибок: {(bulkJob.errors || []).length}</div>
@@ -485,6 +565,62 @@ export default function Dashboard() {
             </Button>
             <Button onClick={startBulk} disabled={bulkRunning || bulkJob?.status === "running" || (bulkPreview && bulkPreview.would_change === 0 && (bulkPreview.signatures_would_change || 0) === 0)} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="bulk-run">
               {bulkJob?.status === "running" ? "Идёт замена…" : "Заменить"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={resyncOpen} onOpenChange={(o) => { if (!o && resyncJob?.status === "running") return; setResyncOpen(o); if (!o) setResyncJob(null); }}>
+        <DialogContent className="rounded-none sm:max-w-md" data-testid="resync-captions-dialog">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <RefreshCw className="h-5 w-5 text-[#0055FF]" /> Обновить подписи в канале
+            </DialogTitle>
+            <DialogDescription>
+              Отправим в Telegram актуальный текст из базы — без замены слов. Для медиа правится только подпись (caption), для текстовых сообщений — сам текст. Если подпись уже такая, пост будет отмечен как «уже актуальный». При ошибке задача идёт дальше, причина пишется в список.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input type="radio" name="resync-scope" checked={resyncScope === "channel"} onChange={() => setResyncScope("channel")} data-testid="resync-scope-channel" />
+              <span className="text-sm">
+                Весь текущий канал {currentChannel?.channel_title ? `(${currentChannel.channel_title})` : ""}
+                <span className="block text-xs text-zinc-400">Все опубликованные посты с сообщением в Telegram</span>
+              </span>
+            </label>
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input type="radio" name="resync-scope" checked={resyncScope === "selected"} onChange={() => setResyncScope("selected")} data-testid="resync-scope-selected" />
+              <span className="text-sm">
+                Только отмеченные ({selectedIds.length})
+                <span className="block text-xs text-zinc-400">Отметьте опубликованные посты галочкой в таблице</span>
+              </span>
+            </label>
+
+            {resyncJob && (
+              <div className="border border-zinc-200 p-3 space-y-2" data-testid="resync-progress">
+                <div className="text-sm font-medium">
+                  {resyncJob.status === "running" ? "Обновляем подписи…" : resyncJob.status === "done" ? "Готово" : "Ошибка"}
+                </div>
+                <Progress value={resyncJob.total ? Math.min(100, Math.round(((resyncJob.processed || 0) / resyncJob.total) * 100)) : (resyncJob.status === "done" ? 100 : 0)} className="rounded-none h-2" />
+                <div className="text-xs text-zinc-600 space-y-0.5">
+                  <div>Отправлено: {resyncJob.sent || 0} / {resyncJob.total || 0}</div>
+                  <div>Обновлено: {resyncJob.ok || 0}</div>
+                  <div>Уже актуальные: {resyncJob.already_same || 0}</div>
+                  {!!resyncJob.skipped && <div>Пропущено: {resyncJob.skipped}</div>}
+                  <div>Ошибок: {(resyncJob.errors || []).length}</div>
+                </div>
+                {(resyncJob.errors || []).slice(0, 8).map((e, i) => (
+                  <div key={i} className="text-xs text-red-600 break-words">{e.id}: {e.message}</div>
+                ))}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { if (resyncJob?.status !== "running") setResyncOpen(false); }} disabled={resyncJob?.status === "running"} className="rounded-none border-zinc-200" data-testid="resync-cancel">
+              {resyncJob?.status === "running" ? "Идёт обновление…" : "Закрыть"}
+            </Button>
+            <Button onClick={startResync} disabled={resyncStarting || resyncJob?.status === "running"} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="resync-run">
+              {resyncJob?.status === "running" ? "Идёт обновление…" : "Обновить подписи"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -695,6 +831,9 @@ export default function Dashboard() {
             <p className="text-zinc-500 mt-2 max-w-2xl">Статистика и посты показаны только для выбранного канала. Сменить канал можно в шапке.</p>
           </div>
           <div className="flex items-center gap-2">
+            <Button onClick={() => { setResyncScope(selectedIds.length ? "selected" : "channel"); setResyncOpen(true); }} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="resync-captions-btn">
+              <RefreshCw className="h-4 w-4 mr-2" /> Обновить подписи
+            </Button>
             <Button onClick={() => setBulkOpen(true)} variant="outline" className="rounded-none border-zinc-200 hover:bg-zinc-100" data-testid="bulk-replace-btn">
               <Replace className="h-4 w-4 mr-2" /> Заменить в описаниях
             </Button>
@@ -807,6 +946,15 @@ export default function Dashboard() {
             <Table>
               <TableHeader>
                 <TableRow className="hover:bg-transparent border-zinc-200">
+                  <TableHead className="w-[36px]">
+                    <Checkbox
+                      checked={allPageSelected}
+                      onCheckedChange={toggleSelectPage}
+                      disabled={!publishedOnPage.length}
+                      aria-label="Отметить опубликованные на странице"
+                      data-testid="select-page-posts"
+                    />
+                  </TableHead>
                   <TableHead className="w-[60px]"></TableHead>
                   <TableHead className="label-caps text-zinc-500">Заголовок</TableHead>
                   <TableHead className="label-caps text-zinc-500">Описание</TableHead>
@@ -820,6 +968,15 @@ export default function Dashboard() {
               <TableBody>
                 {posts.map((p) => (
                   <TableRow key={p.id} className="border-zinc-100 hover:bg-zinc-50 transition-colors duration-150" data-testid={`post-row-${p.id}`}>
+                    <TableCell>
+                      <Checkbox
+                        checked={selectedIds.includes(p.id)}
+                        onCheckedChange={() => toggleSelected(p.id)}
+                        disabled={!p.published}
+                        aria-label="Отметить пост"
+                        data-testid={`select-post-${p.id}`}
+                      />
+                    </TableCell>
                     <TableCell>
                       {p.cover_url ? (
                         <img src={p.cover_url} alt="" className="h-10 w-10 object-cover border border-zinc-200 bg-zinc-50" data-testid={`thumb-${p.id}`} />
@@ -930,6 +1087,9 @@ export default function Dashboard() {
                         </button>
                         <button onClick={() => toggleQueue(p)} disabled={!(p.status === "ready" || p.status === "published")} className={`p-2 disabled:opacity-30 ${p.in_queue ? "text-amber-600" : "text-zinc-400 hover:text-amber-600"}`} title={p.in_queue ? "Убрать из очереди" : "Добавить в очередь"} data-testid={`queue-${p.id}`}>
                           <ListPlus className="h-4 w-4" />
+                        </button>
+                        <button onClick={() => resyncOne(p)} disabled={!p.published || resyncingId === p.id} className="p-2 text-zinc-400 hover:text-[#0055FF] disabled:opacity-30 disabled:hover:text-zinc-400" title="Обновить подпись в канале" data-testid={`resync-caption-${p.id}`}>
+                          <RefreshCw className={`h-4 w-4 ${resyncingId === p.id ? "animate-spin" : ""}`} />
                         </button>
                         <button onClick={() => navigate(`/edit/${p.id}`)} disabled={!(p.status === "ready" || p.status === "published")} className="p-2 text-zinc-400 hover:text-[#0055FF] disabled:opacity-30 disabled:hover:text-zinc-400" title="Редактировать" data-testid={`edit-${p.id}`}>
                           <Pencil className="h-4 w-4" />
