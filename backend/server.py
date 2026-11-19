@@ -22,6 +22,7 @@ from database import db, get_gridfs
 import storage
 import auth
 import telegram_api
+import bulk_replace
 import bot_config
 import video_prep
 import watermark
@@ -127,6 +128,8 @@ class BulkReplaceIn(BaseModel):
     replace: str = ""
     channel_ref: Optional[str] = None  # None/"" = все каналы
     update_live: bool = True  # обновлять опубликованный контент (Telegraph/подписи в канале)
+    dry_run: bool = False  # только посчитать совпадения, ничего не менять
+    include_signatures: bool = False  # также заменить в готовых подписях
 
 
 class SchedulerIn(BaseModel):
@@ -1088,73 +1091,150 @@ async def publish_all(user=Depends(auth.get_current_user)):
     return {"started": len(ids)}
 
 
-async def _bulk_replace_task(ids: list, find: str, replace: str, update_live: bool, user: dict):
-    """Массовая замена текста в описаниях. Перерисовывает Telegraph-статьи (edit_post)
-    и, если update_live, обновляет живые подписи/тексты сообщений в канале. По одному с паузой."""
-    for pid in ids:
-        try:
-            post = await db.posts.find_one({"id": pid})
-            if not post:
-                continue
-            blocks = post.get("blocks", [])
-            text_block = next((b for b in blocks if b.get("type") == "text"), None)
-            if not text_block or find not in (text_block.get("value") or ""):
-                continue
-            new_desc = (text_block.get("value") or "").replace(find, replace)
-            media = [
-                MediaEdit(idx=i, caption=b.get("caption", ""), is_cover=bool(b.get("is_cover")))
-                for i, b in enumerate(blocks) if b.get("type") in ("photo", "video")
-            ]
-            payload = PostEditIn(
-                title=post.get("title") or "",
-                description=new_desc,
-                hashtags=post.get("hashtags") or [],
-                media=media,
-                new_media=[],
-                channel_ref=post.get("channel_ref"),
-            )
-            # Перерисовывает Telegraph-статью (тот же URL) и обновляет blocks/preview в БД
-            await edit_post(pid, payload, user)
+async def _bulk_job_inc(job_id: str, **inc):
+    await db.bulk_jobs.update_one({"id": job_id}, {"$inc": inc})
 
-            # Обновляем живой контент в канале у опубликованных постов
-            if update_live and post.get("published"):
-                fresh = await db.posts.find_one({"id": pid})
-                channel = await _resolve_channel(fresh)
-                mid = fresh.get("channel_message_id")
-                if channel and mid:
-                    caption = _native_caption(fresh) if fresh.get("post_type") == "native" else _publish_caption(fresh)
+
+async def _bulk_job_error(job_id: str, pid: str, stage: str, message: str):
+    await db.bulk_jobs.update_one(
+        {"id": job_id},
+        {"$push": {"errors": {"id": pid, "stage": stage, "message": str(message)[:400]}}},
+    )
+
+
+async def _live_edit_caption(post: dict):
+    """Обновляет подпись опубликованного сообщения в канале (первое/единственное с caption)."""
+    channel = await _resolve_channel(post)
+    mid = post.get("channel_message_id")
+    if not channel or not mid:
+        return "skip"
+    caption = _native_caption(post) if post.get("post_type") == "native" else _publish_caption(post)
+    try:
+        await telegram_api.edit_message_caption(channel["channel_id"], mid, caption)
+        return "ok"
+    except Exception:
+        try:
+            await telegram_api.edit_message_text(channel["channel_id"], mid, caption)
+            return "ok"
+        except Exception as e2:
+            logger.warning("bulk replace: live edit failed for %s: %s", post.get("id"), e2)
+            raise
+
+
+async def _bulk_replace_task(job_id: str, ids: list, find: str, replace: str, update_live: bool,
+                             include_signatures: bool, sig_ids: list, user: dict):
+    """Фоновая замена. Пишет прогресс в bulk_jobs. Два полных прохода не запускаем — один job_id."""
+    try:
+        for pid in ids:
+            try:
+                post = await db.posts.find_one({"id": pid})
+                if not post or not bulk_replace.post_would_change(post, find, replace):
+                    await _bulk_job_inc(job_id, processed=1, skipped_noop=1)
+                    continue
+                blocks = post.get("blocks", [])
+                new_blocks = bulk_replace.apply_to_post_blocks(blocks, find, replace)
+                new_desc = next((b.get("value") or "" for b in new_blocks if b.get("type") == "text"), "")
+                media = [
+                    MediaEdit(idx=i, caption=b.get("caption", ""), is_cover=bool(b.get("is_cover")))
+                    for i, b in enumerate(new_blocks) if b.get("type") in ("photo", "video")
+                ]
+                # Перерисовывает Telegraph-статью (тот же URL) и обновляет blocks/preview в БД
+                await edit_post(pid, PostEditIn(
+                    title=post.get("title") or "",
+                    description=new_desc,
+                    hashtags=post.get("hashtags") or [],
+                    media=media,
+                    new_media=[],
+                    channel_ref=post.get("channel_ref"),
+                ), user)
+                await _bulk_job_inc(job_id, updated_db=1)
+
+                if update_live and post.get("published"):
+                    fresh = await db.posts.find_one({"id": pid})
                     try:
-                        await telegram_api.edit_message_caption(channel["channel_id"], mid, caption)
-                    except Exception:
-                        # сообщение без медиа (sendMessage) — правим текст
-                        try:
-                            await telegram_api.edit_message_text(channel["channel_id"], mid, caption)
-                        except Exception as e2:
-                            logger.warning("bulk replace: live edit failed for %s: %s", pid, e2)
-            await asyncio.sleep(1.0)
-        except Exception as e:
-            logger.warning("bulk replace failed for %s: %s", pid, e)
+                        result = await _live_edit_caption(fresh)
+                        if result == "ok":
+                            await _bulk_job_inc(job_id, updated_telegram=1)
+                    except Exception as e2:
+                        await _bulk_job_error(job_id, pid, "telegram", str(e2))
+                await _bulk_job_inc(job_id, processed=1)
+                await asyncio.sleep(1.0)
+            except Exception as e:
+                logger.warning("bulk replace failed for %s: %s", pid, e)
+                await _bulk_job_error(job_id, pid, "db", str(e))
+                await _bulk_job_inc(job_id, processed=1)
+
+        if include_signatures:
+            for sid in sig_ids:
+                try:
+                    sig = await db.signatures.find_one({"id": sid})
+                    if not sig:
+                        continue
+                    content = sig.get("content") or ""
+                    new_content = bulk_replace.apply_replace(content, find, replace)
+                    if new_content == content:
+                        continue
+                    await db.signatures.update_one({"id": sid}, {"$set": {"content": new_content}})
+                    await _bulk_job_inc(job_id, signatures_updated=1, processed=1)
+                except Exception as e:
+                    logger.warning("bulk replace signature failed for %s: %s", sid, e)
+                    await _bulk_job_error(job_id, sid, "signature", str(e))
+
+        await db.bulk_jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "done", "finished_at": bulk_replace.now_iso()}},
+        )
+    except Exception as e:
+        logger.exception("bulk replace job crashed")
+        await db.bulk_jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "error", "finished_at": bulk_replace.now_iso(), "message": str(e)[:400]}},
+        )
+
+
+@api_router.get("/posts/bulk-replace-description/{job_id}")
+async def get_bulk_replace_job(job_id: str, user=Depends(auth.get_current_user)):
+    job = await db.bulk_jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+    return job
 
 
 @api_router.post("/posts/bulk-replace-description")
 async def bulk_replace_description(payload: BulkReplaceIn, user=Depends(auth.get_current_user)):
-    find = payload.find
+    find = (payload.find or "").strip()
     if not find:
         raise HTTPException(status_code=400, detail="Укажите текст, который нужно заменить")
+    replace = payload.replace or ""
     query = {"status": {"$in": ["ready", "published"]}}
     if payload.channel_ref and payload.channel_ref.strip():
         query["channel_ref"] = payload.channel_ref.strip()
-    posts = await db.posts.find(query, {"id": 1, "blocks": 1}).to_list(5000)
-    ids = []
-    for p in posts:
-        for b in p.get("blocks", []):
-            if b.get("type") == "text" and find in (b.get("value") or ""):
-                ids.append(p["id"])
-                break
-    if not ids:
-        return {"matched": 0, "started": 0}
-    asyncio.create_task(_bulk_replace_task(ids, find, payload.replace, payload.update_live, user))
-    return {"matched": len(ids), "started": len(ids)}
+    posts = await db.posts.find(
+        query, {"id": 1, "title": 1, "blocks": 1, "preview": 1, "published": 1, "post_type": 1, "hashtags": 1, "channel_ref": 1},
+    ).to_list(5000)
+    signatures = []
+    if payload.include_signatures:
+        signatures = await db.signatures.find({}, {"_id": 0, "id": 1, "name": 1, "content": 1}).to_list(200)
+    summary = bulk_replace.summarize_scan(posts, find, replace, signatures)
+
+    if payload.dry_run or (summary["would_change"] == 0 and summary["signatures_would_change"] == 0):
+        return {"started": 0, "job_id": None, "dry_run": True, **summary}
+
+    job_id = str(uuid.uuid4())
+    change_ids = [p["id"] for p in posts if bulk_replace.post_would_change(p, find, replace)]
+    sig_ids = [s["id"] for s in signatures if bulk_replace.would_change(s.get("content") or "", find, replace)]
+    await db.bulk_jobs.insert_one(bulk_replace.new_job_doc(summary, {
+        "job_id": job_id,
+        "replace": replace,
+        "channel_ref": (payload.channel_ref or "").strip() or None,
+        "update_live": payload.update_live,
+        "include_signatures": payload.include_signatures,
+    }))
+    asyncio.create_task(_bulk_replace_task(
+        job_id, change_ids, find, replace, payload.update_live,
+        payload.include_signatures, sig_ids, user,
+    ))
+    return {"started": len(change_ids) + len(sig_ids), "job_id": job_id, "dry_run": False, **summary}
 
 
 def _parse_scheduled(s: str) -> str:
