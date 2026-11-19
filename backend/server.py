@@ -23,6 +23,7 @@ import storage
 import auth
 import telegram_api
 import bulk_replace
+import caption_sync
 import bot_config
 import video_prep
 import watermark
@@ -1102,23 +1103,34 @@ async def _bulk_job_error(job_id: str, pid: str, stage: str, message: str):
     )
 
 
-async def _live_edit_caption(post: dict):
-    """Обновляет подпись опубликованного сообщения в канале (первое/единственное с caption)."""
+async def _push_post_caption(post: dict) -> dict:
+    """Пушит текущую подпись поста в Telegram. Не меняет текст в БД."""
     channel = await _resolve_channel(post)
-    mid = post.get("channel_message_id")
-    if not channel or not mid:
-        return "skip"
+    if not channel or not channel.get("channel_id"):
+        return {"status": "skip", "message": "Канал не найден"}
     caption = _native_caption(post) if post.get("post_type") == "native" else _publish_caption(post)
-    try:
-        await telegram_api.edit_message_caption(channel["channel_id"], mid, caption)
-        return "ok"
-    except Exception:
-        try:
-            await telegram_api.edit_message_text(channel["channel_id"], mid, caption)
-            return "ok"
-        except Exception as e2:
-            logger.warning("bulk replace: live edit failed for %s: %s", post.get("id"), e2)
-            raise
+    return await caption_sync.push_caption(post, caption, channel["channel_id"])
+
+
+async def _store_sync_result(post_id: str, result: dict) -> dict:
+    fields = caption_sync.last_sync_fields(result)
+    await db.posts.update_one({"id": post_id}, {"$set": fields})
+    return fields
+
+
+async def _finalize_edit(post_id: str, post: dict, built: dict, sync_telegram: bool) -> dict:
+    """Пишет updated_at и, если пост уже в канале, подтягивает подпись в Telegram."""
+    now = caption_sync.now_iso()
+    await db.posts.update_one({"id": post_id}, {"$set": {"updated_at": now}})
+    out = {"status": "updated", "updated_at": now}
+    published = bool(post.get("published") or post.get("status") == "published")
+    if sync_telegram and published:
+        result = await _push_post_caption(built)
+        fields = await _store_sync_result(post_id, result)
+        out["telegram_sync"] = result
+        out["last_sync"] = fields["last_sync"]
+        out["updated_at"] = fields["updated_at"]
+    return out
 
 
 async def _bulk_replace_task(job_id: str, ids: list, find: str, replace: str, update_live: bool,
@@ -1139,26 +1151,31 @@ async def _bulk_replace_task(job_id: str, ids: list, find: str, replace: str, up
                     for i, b in enumerate(new_blocks) if b.get("type") in ("photo", "video")
                 ]
                 # Перерисовывает Telegraph-статью (тот же URL) и обновляет blocks/preview в БД
-                await edit_post(pid, PostEditIn(
+                await apply_post_edit(pid, PostEditIn(
                     title=post.get("title") or "",
                     description=new_desc,
                     hashtags=post.get("hashtags") or [],
                     media=media,
                     new_media=[],
                     channel_ref=post.get("channel_ref"),
-                ), user)
+                ), user, sync_telegram=False)
                 await _bulk_job_inc(job_id, updated_db=1)
 
                 if update_live and post.get("published"):
                     fresh = await db.posts.find_one({"id": pid})
                     try:
-                        result = await _live_edit_caption(fresh)
-                        if result == "ok":
+                        result = await _push_post_caption(fresh)
+                        await _store_sync_result(pid, result)
+                        if result.get("status") == "ok":
                             await _bulk_job_inc(job_id, updated_telegram=1)
+                        elif result.get("status") == "already_same":
+                            await _bulk_job_inc(job_id, already_same=1)
+                        elif result.get("status") != "skip":
+                            await _bulk_job_error(job_id, pid, "telegram", result.get("message") or "ошибка")
                     except Exception as e2:
                         await _bulk_job_error(job_id, pid, "telegram", str(e2))
                 await _bulk_job_inc(job_id, processed=1)
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(caption_sync.SLEEP_BETWEEN_POSTS)
             except Exception as e:
                 logger.warning("bulk replace failed for %s: %s", pid, e)
                 await _bulk_job_error(job_id, pid, "db", str(e))
@@ -1235,6 +1252,116 @@ async def bulk_replace_description(payload: BulkReplaceIn, user=Depends(auth.get
         payload.include_signatures, sig_ids, user,
     ))
     return {"started": len(change_ids) + len(sig_ids), "job_id": job_id, "dry_run": False, **summary}
+
+
+class ResyncCaptionsIn(BaseModel):
+    post_ids: Optional[List[str]] = None
+    channel_ref: Optional[str] = None  # пусто и без post_ids — ошибка; иначе все опубликованные канала
+
+
+async def _published_resync_ids(post_ids=None, channel_ref=None) -> list:
+    query = {"published": True, "$or": [
+        {"channel_message_id": {"$ne": None, "$exists": True}},
+        {"channel_message_ids.0": {"$exists": True}},
+    ]}
+    if post_ids:
+        query["id"] = {"$in": [x for x in post_ids if x]}
+    elif channel_ref and channel_ref.strip():
+        query["channel_ref"] = channel_ref.strip()
+    else:
+        return []
+    rows = await db.posts.find(query, {"id": 1}).to_list(5000)
+    return [r["id"] for r in rows]
+
+
+async def _resync_captions_task(job_id: str, ids: list):
+    try:
+        for pid in ids:
+            try:
+                post = await db.posts.find_one({"id": pid})
+                if not post:
+                    await _bulk_job_error(job_id, pid, "resync", "Пост не найден")
+                    await _bulk_job_inc(job_id, processed=1, sent=1)
+                    continue
+                result = await _push_post_caption(post)
+                await _store_sync_result(pid, result)
+                await _bulk_job_inc(job_id, sent=1, processed=1)
+                st = result.get("status")
+                if st == "ok":
+                    await _bulk_job_inc(job_id, ok=1)
+                elif st == "already_same":
+                    await _bulk_job_inc(job_id, already_same=1)
+                elif st == "skip":
+                    await _bulk_job_inc(job_id, skipped=1)
+                else:
+                    await _bulk_job_error(job_id, pid, "telegram", result.get("message") or "ошибка")
+            except Exception as e:
+                logger.warning("resync caption failed for %s: %s", pid, e)
+                await _bulk_job_error(job_id, pid, "telegram", str(e))
+                await _bulk_job_inc(job_id, processed=1, sent=1)
+            await asyncio.sleep(caption_sync.SLEEP_BETWEEN_POSTS)
+        await db.bulk_jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "done", "finished_at": caption_sync.now_iso()}},
+        )
+    except Exception as e:
+        logger.exception("resync captions job crashed")
+        await db.bulk_jobs.update_one(
+            {"id": job_id},
+            {"$set": {"status": "error", "finished_at": caption_sync.now_iso(), "message": str(e)[:400]}},
+        )
+
+
+@api_router.post("/posts/{post_id}/resync-caption")
+async def resync_one_caption(post_id: str, user=Depends(auth.get_current_user)):
+    post = await db.posts.find_one({"id": post_id})
+    if not post:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    if not (post.get("published") or post.get("status") == "published"):
+        raise HTTPException(status_code=400, detail="Пост ещё не опубликован в канале")
+    result = await _push_post_caption(post)
+    fields = await _store_sync_result(post_id, result)
+    return {"id": post_id, **result, "last_sync": fields["last_sync"], "updated_at": fields["updated_at"]}
+
+
+@api_router.get("/posts/resync-captions/{job_id}")
+async def get_resync_captions_job(job_id: str, user=Depends(auth.get_current_user)):
+    job = await db.bulk_jobs.find_one({"id": job_id}, {"_id": 0})
+    if not job:
+        raise HTTPException(status_code=404, detail="Задача не найдена")
+    return job
+
+
+@api_router.post("/posts/resync-captions")
+async def resync_captions(payload: ResyncCaptionsIn, user=Depends(auth.get_current_user)):
+    ids = payload.post_ids or []
+    ids = [x for x in ids if x]
+    if ids:
+        ids = await _published_resync_ids(post_ids=ids)
+    elif payload.channel_ref and payload.channel_ref.strip():
+        ids = await _published_resync_ids(channel_ref=payload.channel_ref)
+    else:
+        raise HTTPException(status_code=400, detail="Укажите канал или список постов")
+    if not ids:
+        return {"job_id": None, "started": 0, "total": 0, "message": "Нет опубликованных постов с сообщением в канале"}
+    job_id = str(uuid.uuid4())
+    await db.bulk_jobs.insert_one({
+        "id": job_id,
+        "type": "resync_captions",
+        "status": "running",
+        "channel_ref": (payload.channel_ref or "").strip() or None,
+        "total": len(ids),
+        "processed": 0,
+        "sent": 0,
+        "ok": 0,
+        "already_same": 0,
+        "skipped": 0,
+        "errors": [],
+        "started_at": caption_sync.now_iso(),
+        "finished_at": None,
+    })
+    asyncio.create_task(_resync_captions_task(job_id, ids))
+    return {"job_id": job_id, "started": len(ids), "total": len(ids)}
 
 
 def _parse_scheduled(s: str) -> str:
@@ -1457,6 +1584,10 @@ async def get_post_for_edit(post_id: str, user=Depends(auth.get_current_user)):
 
 @api_router.put("/posts/{post_id}")
 async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_current_user)):
+    return await apply_post_edit(post_id, payload, user, sync_telegram=True)
+
+
+async def apply_post_edit(post_id: str, payload: PostEditIn, user, sync_telegram: bool = True):
     post = await db.posts.find_one({"id": post_id})
     if not post:
         raise HTTPException(status_code=404, detail="Пост не найден")
@@ -1552,7 +1683,10 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
             }},
         )
         await _cleanup_removed()
-        return {"status": "updated"}
+        built = {**post, "title": title, "blocks": blocks, "hashtags": tags,
+                 "channel_ref": payload.channel_ref or post.get("channel_ref"),
+                 "preview": desc[:200]}
+        return await _finalize_edit(post_id, post, built, sync_telegram)
 
     photos_url, photos_paths = post.get("photos_url"), post.get("photos_paths") or ([post["photos_path"]] if post.get("photos_path") else [])
     videos_url, videos_paths = post.get("videos_url"), post.get("videos_paths") or ([post["videos_path"]] if post.get("videos_path") else [])
@@ -1617,7 +1751,14 @@ async def edit_post(post_id: str, payload: PostEditIn, user=Depends(auth.get_cur
     # Удаляем файлы убранных медиа с хостинга
     await _cleanup_removed()
 
-    return {"status": "updated", "telegraph_url": photos_url or videos_url}
+    built = {**post, "title": title, "blocks": blocks, "hashtags": tags,
+             "channel_ref": payload.channel_ref or post.get("channel_ref"),
+             "telegraph_url": photos_url or videos_url,
+             "photos_url": photos_url, "videos_url": videos_url,
+             "preview": desc[:200]}
+    out = await _finalize_edit(post_id, post, built, sync_telegram)
+    out["telegraph_url"] = photos_url or videos_url
+    return out
 
 
 # ---------- Upload ----------
