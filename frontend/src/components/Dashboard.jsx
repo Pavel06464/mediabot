@@ -33,6 +33,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Progress } from "@/components/ui/progress";
 import {
   Dialog,
   DialogContent,
@@ -107,6 +108,30 @@ function StatCard({ label, value, icon: Icon, accent, testid, sub }) {
   );
 }
 
+
+/** В превью описания показываем подпись markdown-ссылки, а адрес — во всплывающей подсказке.
+ *  Иначе узкая колонка рвёт https://t.me/Bot на «t.me/» + «Bot» и кажется, будто ссылка с опечаткой t.me/t.me/.
+ */
+function DescriptionPreview({ text }) {
+  if (!text?.trim()) return <span className="text-zinc-300">—</span>;
+  const re = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+  const parts = [];
+  let last = 0;
+  let m;
+  let key = 0;
+  while ((m = re.exec(text))) {
+    if (m.index > last) parts.push(<span key={key++}>{text.slice(last, m.index)}</span>);
+    parts.push(
+      <a key={key++} href={m[2]} target="_blank" rel="noreferrer" className="text-[#0055FF] hover:underline" title={m[2]}>
+        {m[1]}
+      </a>
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push(<span key={key++}>{text.slice(last)}</span>);
+  return <span className="line-clamp-2" title={text}>{parts}</span>;
+}
+
 export default function Dashboard() {
   const navigate = useNavigate();
   const { logout } = useAuth();
@@ -166,25 +191,44 @@ export default function Dashboard() {
   const [bulkFind, setBulkFind] = useState("");
   const [bulkReplace, setBulkReplace] = useState("");
   const [bulkOnlyChannel, setBulkOnlyChannel] = useState(true);
+  const [bulkSignatures, setBulkSignatures] = useState(true);
   const [bulkRunning, setBulkRunning] = useState(false);
+  const [bulkPreview, setBulkPreview] = useState(null);
+  const [bulkJob, setBulkJob] = useState(null);
 
-  const runBulkReplace = async () => {
+  const bulkPayload = (dryRun) => ({
+    find: bulkFind.trim(),
+    replace: bulkReplace,
+    channel_ref: bulkOnlyChannel ? selectedChannel : null,
+    update_live: true,
+    include_signatures: bulkSignatures,
+    dry_run: dryRun,
+  });
+
+  const previewBulk = async () => {
     if (!bulkFind.trim()) return toast.error("Укажите текст, который нужно заменить");
     setBulkRunning(true);
     try {
-      const { data } = await api.post("/posts/bulk-replace-description", {
-        find: bulkFind,
-        replace: bulkReplace,
-        channel_ref: bulkOnlyChannel ? selectedChannel : null,
-        update_live: true,
-      });
-      if (data.matched === 0) {
-        toast.info("Постов с таким текстом не найдено");
+      const { data } = await api.post("/posts/bulk-replace-description", bulkPayload(true));
+      setBulkPreview(data);
+      setBulkJob(null);
+    } catch (e) {
+      toast.error(e.response?.data?.detail || "Ошибка поиска");
+    } finally {
+      setBulkRunning(false);
+    }
+  };
+
+  const startBulk = async () => {
+    if (!bulkFind.trim()) return toast.error("Укажите текст, который нужно заменить");
+    setBulkRunning(true);
+    try {
+      const { data } = await api.post("/posts/bulk-replace-description", bulkPayload(false));
+      setBulkPreview(data);
+      if (!data.job_id) {
+        toast.info(data.message || "Нечего менять");
       } else {
-        toast.success(`Замена запущена в ${data.matched} постах — идёт в фоне, обновите через минуту`);
-        setBulkOpen(false);
-        setBulkFind(""); setBulkReplace("");
-        setTimeout(load, 3000);
+        setBulkJob({ id: data.job_id, status: "running", total: data.would_change + (data.signatures_would_change || 0), processed: 0, updated_db: 0, updated_telegram: 0, skipped_noop: data.noop || 0, errors: [] });
       }
     } catch (e) {
       toast.error(e.response?.data?.detail || "Ошибка массовой замены");
@@ -192,6 +236,7 @@ export default function Dashboard() {
       setBulkRunning(false);
     }
   };
+
 
   const load = useCallback(async () => {
     if (!selectedChannel) { setLoading(false); return; }
@@ -216,6 +261,28 @@ export default function Dashboard() {
   }, [qInput]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    if (!bulkJob?.id || (bulkJob.status && bulkJob.status !== "running")) return undefined;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const { data } = await api.get(`/posts/bulk-replace-description/${bulkJob.id}`);
+        if (stopped) return;
+        setBulkJob(data);
+        if (data.status === "done" || data.status === "error") {
+          const errN = (data.errors || []).length;
+          if (data.status === "error") toast.error(data.message || "Замена оборвалась");
+          else if (errN) toast.warning(`Готово: в базе ${data.updated_db}, в канале ${data.updated_telegram}, ошибок ${errN}`);
+          else toast.success(`Готово: обновлено в базе ${data.updated_db}, в канале ${data.updated_telegram}`);
+          setTimeout(load, 500);
+        }
+      } catch { /* опрос продолжим */ }
+    };
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => { stopped = true; clearInterval(t); };
+  }, [bulkJob?.id, bulkJob?.status, load]);
 
   // Пока идут фоновые загрузки — обновляем таблицу, чтобы видеть смену статусов
   useEffect(() => {
@@ -339,24 +406,24 @@ export default function Dashboard() {
       <BotSettings open={botOpen} onOpenChange={setBotOpen} />
       <SchedulerSettings open={schedulerOpen} onOpenChange={setSchedulerOpen} onChange={load} />
 
-      <Dialog open={bulkOpen} onOpenChange={(o) => !o && setBulkOpen(false)}>
+      <Dialog open={bulkOpen} onOpenChange={(o) => { if (!o && bulkJob?.status === "running") return; setBulkOpen(o); if (!o) { setBulkPreview(null); setBulkJob(null); } }}>
         <DialogContent className="rounded-none sm:max-w-md" data-testid="bulk-replace-dialog">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Replace className="h-5 w-5 text-[#0055FF]" /> Заменить текст в описаниях
             </DialogTitle>
             <DialogDescription>
-              Найдёт текст во всех описаниях и заменит его. Например, старую ссылку на новую. Опубликованные посты тоже обновятся в канале.
+              Сначала найдём совпадения и покажем, что именно лежит в описаниях. Для ссылок учитываются опечатка t.me/t.me/ и вариант без https://, в том числе адрес внутри markdown [текст](ссылка). Если запустите замену, опубликованные посты обновятся и в канале — это идёт в фоне, прогресс будет здесь.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3 py-2">
             <div>
               <label className="label-caps text-zinc-500 block mb-1">Что заменить</label>
-              <Input value={bulkFind} onChange={(e) => setBulkFind(e.target.value)} placeholder="https://old-link.com/…" className="rounded-none" data-testid="bulk-find-input" />
+              <Input value={bulkFind} onChange={(e) => { setBulkFind(e.target.value); setBulkPreview(null); }} placeholder="https://old-link.com/…" className="rounded-none" data-testid="bulk-find-input" />
             </div>
             <div>
               <label className="label-caps text-zinc-500 block mb-1">На что</label>
-              <Input value={bulkReplace} onChange={(e) => setBulkReplace(e.target.value)} placeholder="https://new-link.com/… (пусто = удалить)" className="rounded-none" data-testid="bulk-replace-input" />
+              <Input value={bulkReplace} onChange={(e) => { setBulkReplace(e.target.value); setBulkPreview(null); }} placeholder="https://new-link.com/… (пусто = удалить)" className="rounded-none" data-testid="bulk-replace-input" />
             </div>
             <label className="flex items-start gap-3 cursor-pointer">
               <Checkbox checked={bulkOnlyChannel} onCheckedChange={(v) => setBulkOnlyChannel(!!v)} data-testid="bulk-only-channel" />
@@ -365,11 +432,59 @@ export default function Dashboard() {
                 <span className="block text-xs text-zinc-400">Снимите галочку, чтобы заменить во всех каналах</span>
               </span>
             </label>
+            <label className="flex items-start gap-3 cursor-pointer">
+              <Checkbox checked={bulkSignatures} onCheckedChange={(v) => setBulkSignatures(!!v)} data-testid="bulk-signatures" />
+              <span className="text-sm">Также в готовых подписях</span>
+            </label>
+
+            {bulkPreview && !bulkJob && (
+              <div className="border border-zinc-200 bg-zinc-50 p-3 text-sm space-y-2" data-testid="bulk-preview">
+                <div>{bulkPreview.message}</div>
+                {bulkPreview.find_normalized && bulkPreview.find_normalized !== bulkFind.trim() && (
+                  <div className="text-xs text-zinc-500">Нормализованная ссылка: <code className="break-all">{bulkPreview.find_normalized}</code></div>
+                )}
+                <div className="text-xs text-zinc-600">
+                  Найдено постов: {bulkPreview.matched} (точных: {bulkPreview.matched_exact}), изменятся: {bulkPreview.would_change}, без изменений: {bulkPreview.noop}
+                  {bulkPreview.signatures_matched ? ` · подписей: ${bulkPreview.signatures_matched}, изменятся: ${bulkPreview.signatures_would_change}` : ""}
+                </div>
+                {(bulkPreview.samples || []).slice(0, 3).map((s) => (
+                  <div key={s.id} className="text-xs text-zinc-500 break-words">
+                    <span className="font-medium text-zinc-700">{s.title || s.id}</span>
+                    {s.labels?.length ? ` [${s.labels.join(", ")}]` : ""}: {s.snippet}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {bulkJob && (
+              <div className="border border-zinc-200 p-3 space-y-2" data-testid="bulk-progress">
+                <div className="text-sm font-medium">
+                  {bulkJob.status === "running" ? "Идёт замена…" : bulkJob.status === "done" ? "Готово" : "Ошибка"}
+                </div>
+                <Progress value={bulkJob.total ? Math.min(100, Math.round(((bulkJob.processed || 0) / bulkJob.total) * 100)) : (bulkJob.status === "done" ? 100 : 0)} className="rounded-none h-2" />
+                <div className="text-xs text-zinc-600 space-y-0.5">
+                  <div>Найдено постов: {bulkPreview?.matched ?? "—"}</div>
+                  <div>Обновлено в базе: {bulkJob.updated_db || 0} / {bulkJob.total || 0}</div>
+                  <div>Обновлено в Telegram: {bulkJob.updated_telegram || 0} / {bulkJob.total || 0}</div>
+                  {(bulkJob.skipped_noop > 0) && <div>Без изменений (уже нужный текст): {bulkJob.skipped_noop}</div>}
+                  {!!bulkJob.signatures_updated && <div>Подписей обновлено: {bulkJob.signatures_updated}</div>}
+                  <div>Ошибок: {(bulkJob.errors || []).length}</div>
+                </div>
+                {(bulkJob.errors || []).slice(0, 3).map((e, i) => (
+                  <div key={i} className="text-xs text-red-600 break-words">{e.id}: {e.message}</div>
+                ))}
+              </div>
+            )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setBulkOpen(false)} className="rounded-none border-zinc-200" data-testid="bulk-cancel">Отмена</Button>
-            <Button onClick={runBulkReplace} disabled={bulkRunning} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="bulk-run">
-              {bulkRunning ? "Запускаю…" : "Заменить"}
+            <Button variant="outline" onClick={() => { if (bulkJob?.status !== "running") setBulkOpen(false); }} disabled={bulkJob?.status === "running"} className="rounded-none border-zinc-200" data-testid="bulk-cancel">
+              {bulkJob?.status === "running" ? "Идёт замена…" : "Закрыть"}
+            </Button>
+            <Button variant="outline" onClick={previewBulk} disabled={bulkRunning || bulkJob?.status === "running"} className="rounded-none" data-testid="bulk-preview-btn">
+              {bulkRunning && !bulkJob ? "Ищу…" : "Найти"}
+            </Button>
+            <Button onClick={startBulk} disabled={bulkRunning || bulkJob?.status === "running" || (bulkPreview && bulkPreview.would_change === 0 && (bulkPreview.signatures_would_change || 0) === 0)} className="rounded-none bg-[#0055FF] hover:bg-[#0033CC] text-white" data-testid="bulk-run">
+              {bulkJob?.status === "running" ? "Идёт замена…" : "Заменить"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -716,11 +831,7 @@ export default function Dashboard() {
                     </TableCell>
                     <TableCell className="font-semibold max-w-[240px] truncate">{p.title?.trim() ? p.title : <span className="text-zinc-400 italic font-normal">(без названия)</span>}</TableCell>
                     <TableCell className="text-sm text-zinc-500 max-w-[260px]" data-testid={`desc-${p.id}`}>
-                      {p.preview?.trim() ? (
-                        <span className="line-clamp-2" title={p.preview}>{p.preview}</span>
-                      ) : (
-                        <span className="text-zinc-300">—</span>
-                      )}
+                      <DescriptionPreview text={p.preview} />
                     </TableCell>
                     <TableCell className="text-sm text-zinc-500 whitespace-nowrap">{fmtDate(p.created_at)}</TableCell>
                     <TableCell className="text-center">
